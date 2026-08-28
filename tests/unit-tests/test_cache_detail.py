@@ -816,3 +816,84 @@ class TestSplitterMinimumSize:
 
         assert splitter.sizes()[1] < 150  # well under the pre-fix ~226-260px floor
         splitter.hide()
+
+
+# ── Description rendering: html=False must mean plain ────────────────────────
+# The <pre> wrapper preserves the source newlines, but setHtml() still parses
+# any markup inside it — so a description flagged "not HTML" has to be escaped
+# or "plain" doesn't mean plain.
+
+def _shown_description(monkeypatch, qapp, **cache_kwargs) -> str:
+    monkeypatch.setattr(cd, "get_settings", lambda: _fake_settings())
+    panel = CacheDetailPanel()
+    captured: list[str] = []
+    monkeypatch.setattr(panel._desc_view, "setHtml", captured.append)
+    fields = dict(
+        gc_code="GC1TEST", name="Test", cache_type="Traditional Cache",
+        found=False, dnf=False, archived=False, difficulty=1.0, terrain=1.0,
+        container="Micro", country="Denmark", state=None, latitude=55.0,
+        longitude=12.0, hidden_date=None, placed_by=None, owner_name=None,
+        encoded_hints=None, user_note=None, waypoints=[], attributes=[],
+        trackables=[], logs=[], favorite_points=None, url=None,
+        short_description=None, short_desc_html=False,
+        long_description=None, long_desc_html=False,
+    )
+    fields.update(cache_kwargs)
+    panel.show_cache(SimpleNamespace(**fields))
+    return captured[0] if captured else ""
+
+
+def test_plain_description_is_escaped_not_parsed(monkeypatch, qapp):
+    # GC5K1DY-shaped: plain text using "<" as punctuation. Unescaped, the
+    # browser swallows "<------." as a tag and the line breaks go with it.
+    shown = _shown_description(
+        monkeypatch, qapp,
+        long_description="Ergebnis ist A.<------.\nA: 133\nA: 144",
+        long_desc_html=False,
+    )
+    assert "&lt;------." in shown
+    assert "<------." not in shown
+    assert "white-space:pre-wrap" in shown
+
+
+def test_plain_description_markup_shown_literally(monkeypatch, qapp):
+    # A listing geocaching.com marks html="False" renders its markup as text,
+    # and must not have its line breaks doubled by <br> being parsed.
+    shown = _shown_description(
+        monkeypatch, qapp,
+        long_description="<br>\n<br>\n", long_desc_html=False,
+    )
+    assert "&lt;br&gt;" in shown
+    assert "<br>" not in shown
+
+
+def test_html_description_is_not_escaped(monkeypatch, qapp):
+    shown = _shown_description(
+        monkeypatch, qapp,
+        long_description="<p>Real markup</p>", long_desc_html=True,
+    )
+    assert "<p>Real markup</p>" in shown
+    assert "&lt;p&gt;" not in shown
+
+
+def test_plain_short_description_is_escaped(monkeypatch, qapp):
+    shown = _shown_description(
+        monkeypatch, qapp,
+        short_description="Etappe Krummenau <-> Ebnat-Kappel",
+        short_desc_html=False,
+    )
+    assert "&lt;-&gt;" in shown
+
+
+def test_plain_description_does_not_escape_ampersand(monkeypatch, qapp):
+    # Deliberately not html.escape(): a real 144,820-cache database has 323
+    # description fields marked html="False" carrying entity strings from
+    # geocaching.com/GSAK. Escaping '&' would surface those literally
+    # ("&quot;Sacramonte&quot;"), which reads as a bug rather than fidelity.
+    shown = _shown_description(
+        monkeypatch, qapp,
+        long_description='den Cache &quot;Sacramonte&quot; (Dan &amp; Adé)',
+        long_desc_html=False,
+    )
+    assert "&quot;Sacramonte&quot;" in shown
+    assert "&amp;quot;" not in shown

@@ -41,7 +41,7 @@ _SCHEMA = [
         UserData TEXT, User2 TEXT, User3 TEXT, User4 TEXT,
         FavPoints INTEGER, GcNote TEXT, Elevation REAL, Color TEXT,
         Guid TEXT, Watch INTEGER, CacheId TEXT, Lock INTEGER, FoundCount INTEGER,
-        IsPremium INTEGER
+        IsPremium INTEGER, LongHtm INTEGER, ShortHtm INTEGER
     )""",
     """CREATE TABLE CacheMemo (
         Code TEXT, LongDescription TEXT, ShortDescription TEXT,
@@ -199,6 +199,93 @@ def test_import_basic_cache_fields(db_session, tmp_path):
     # GSAK's own FoundCount is identical to Found (0/1), not a true find
     # count, so there's no honest source for it here (see module docstring).
     assert cache.find_count is None
+
+
+# ── Description HTML flag ─────────────────────────────────────────────────────
+# GSAK's LongHtm/ShortHtm hold geocaching.com's own html="True|False" value —
+# the same one the GPX importer reads from <groundspeak:long_description
+# html="..">. The importer used to ignore them and guess with `"<" in text`,
+# which broke every plain-text listing that uses "<" as punctuation.
+
+def test_desc_html_flag_read_from_gsak_columns(db_session, tmp_path):
+    db = _make_gsak_db(
+        tmp_path / "gsak.db3",
+        caches=[{"LongHtm": 1, "ShortHtm": 1}],
+        memos=[{"Code": "GC1TEST", "LongDescription": "<p>Full</p>",
+                "ShortDescription": "<b>Teaser</b>"}],
+    )
+    import_gsak_db(db, db_session)
+    cache = db_session.query(Cache).filter_by(gc_code="GC1TEST").one()
+    assert cache.long_desc_html is True
+    assert cache.short_desc_html is True
+
+
+def test_plain_text_with_angle_bracket_is_not_html(db_session, tmp_path):
+    # Regression: GC5K1DY writes its quiz blanks as "Ergebnis ist A.<------."
+    # seven times. GSAK (and geocaching.com) say LongHtm=0, but the old
+    # `"<" in text` guess said HTML, so all 118 line breaks in that listing
+    # collapsed into one paragraph.
+    db = _make_gsak_db(
+        tmp_path / "gsak.db3",
+        caches=[{"LongHtm": 0, "ShortHtm": 0}],
+        memos=[{"Code": "GC1TEST",
+                "LongDescription": "Ergebnis ist A.<------.\nA: 133\nA: 144",
+                "ShortDescription": "Etappe Krummenau <-> Ebnat-Kappel"}],
+    )
+    import_gsak_db(db, db_session)
+    cache = db_session.query(Cache).filter_by(gc_code="GC1TEST").one()
+    assert cache.long_desc_html is False
+    assert cache.short_desc_html is False
+    # the text itself is untouched — this was only ever a render-flag bug
+    assert "<------." in cache.long_description
+    assert cache.long_description.count("\n") == 2
+
+
+def test_gsak_flag_wins_over_the_text_heuristic(db_session, tmp_path):
+    # The flag is authoritative even when it disagrees with the text: markup
+    # in a listing geocaching.com marks html="False" is shown as written.
+    db = _make_gsak_db(
+        tmp_path / "gsak.db3",
+        caches=[{"LongHtm": 0}],
+        memos=[{"Code": "GC1TEST", "LongDescription": "<b>looks like markup</b>"}],
+    )
+    import_gsak_db(db, db_session)
+    cache = db_session.query(Cache).filter_by(gc_code="GC1TEST").one()
+    assert cache.long_desc_html is False
+
+
+def test_desc_html_falls_back_to_heuristic_when_flag_null(db_session, tmp_path):
+    # Older GSAK databases may not carry the columns at all / leave them NULL.
+    db = _make_gsak_db(
+        tmp_path / "gsak.db3",
+        caches=[{"LongHtm": None, "ShortHtm": None}],
+        memos=[{"Code": "GC1TEST", "LongDescription": "<p>markup</p>",
+                "ShortDescription": "no angle bracket here"}],
+    )
+    import_gsak_db(db, db_session)
+    cache = db_session.query(Cache).filter_by(gc_code="GC1TEST").one()
+    assert cache.long_desc_html is True
+    assert cache.short_desc_html is False
+
+
+def test_desc_html_flag_missing_column_does_not_abort_import(db_session, tmp_path):
+    # A GSAK schema predating the columns entirely must still import.
+    db_path = tmp_path / "gsak.db3"
+    _make_gsak_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE C2 AS SELECT * FROM Caches")
+    conn.execute("DROP TABLE Caches")
+    cols = ", ".join(c for c in
+                     [d[1] for d in conn.execute("PRAGMA table_info(C2)")]
+                     if c not in ("LongHtm", "ShortHtm"))
+    conn.execute(f"CREATE TABLE Caches AS SELECT {cols} FROM C2")
+    conn.execute("DROP TABLE C2")
+    conn.commit()
+    conn.close()
+
+    result = import_gsak_db(db_path, db_session)
+    assert result.errors == []
+    assert result.created == 1
 
 
 def test_elevation_zero_maps_to_none(db_session, tmp_path):

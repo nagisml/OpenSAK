@@ -311,6 +311,39 @@ def _d(value) -> Optional[datetime]:
     return None
 
 
+def _row_get(row: sqlite3.Row, key: str):
+    """``row[key]``, or None when the column isn't present in this schema.
+
+    Older GSAK databases (and the synthetic ones in the test-suite) don't
+    necessarily carry every column ``SELECT c.*`` picks up on a current one.
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
+def _desc_is_html(flag_value, text: Optional[str]) -> bool:
+    """Whether a description should be rendered as HTML.
+
+    GSAK's ``Caches.LongHtm``/``ShortHtm`` hold geocaching.com's own
+    ``html="True|False"`` attribute — the very value the GPX importer reads
+    from ``<groundspeak:long_description html="..">`` (see
+    ``importer/__init__.py``). That is the authoritative answer, so prefer it
+    and keep the two import paths consistent.
+
+    The old heuristic ("does the text contain a '<'") survives only as a
+    fallback for databases where the column is missing or NULL. It is wrong
+    whenever a genuinely plain listing uses '<' as punctuation — verified on
+    a real 144,820-cache database, e.g. GC5K1DY writes its quiz blanks as
+    ``Ergebnis ist A.<------.`` seven times, and every one of that listing's
+    118 line breaks collapsed because the guess said HTML.
+    """
+    if flag_value is not None:
+        return bool(flag_value)
+    return "<" in (text or "")
+
+
 def _attribute_name_lookup() -> dict[int, str]:
     """
     Build an ``{attribute_id: English display name}`` map.
@@ -600,9 +633,11 @@ def _row_to_cache_data(row: sqlite3.Row) -> Optional[dict]:
         "state":       _s(row["State"]),
         "county":      _s(row["County"]),
         "short_description": _s(row["ShortDescription"]),
-        "short_desc_html":   "<" in (_s(row["ShortDescription"]) or ""),
+        "short_desc_html":   _desc_is_html(_row_get(row, "ShortHtm"),
+                                           _s(row["ShortDescription"])),
         "long_description":  _s(row["LongDescription"]),
-        "long_desc_html":    "<" in (_s(row["LongDescription"]) or ""),
+        "long_desc_html":    _desc_is_html(_row_get(row, "LongHtm"),
+                                           _s(row["LongDescription"])),
         # GSAK stores hints already decoded (plain text) — passed straight
         # through. OpenSAK's split_hint() heuristic already auto-detects
         # plain-vs-ROT13 for display, so no re-encoding is needed here.

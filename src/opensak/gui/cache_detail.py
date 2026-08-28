@@ -663,13 +663,21 @@ class CacheDetailPanel(QWidget):
         self._placed_lbl.setText("   |   ".join(parts))
 
         # Description — renderes via QWebEngineView så billeder og CJK-fonte virker
+        # A description flagged as *not* HTML must be escaped before it goes
+        # into setHtml(), otherwise "plain" doesn't mean plain: the <pre>
+        # wrapper preserves the source newlines but the browser still parses
+        # any markup inside it. Without escaping, a listing whose text is
+        # literally "<br>\n<br>\n" renders twice the intended line breaks,
+        # and a plain-text listing containing a bare "<" loses everything the
+        # browser swallows as a tag. Escaping makes the flag mean what
+        # geocaching.com means by html="False" — show the text as written.
         if cache.long_description:
             if cache.long_desc_html:
                 self._desc_view.setHtml(_wrap_html(cache.long_description))
             else:
                 self._desc_view.setHtml(_wrap_html(
                     f"<pre style='white-space:pre-wrap;font-family:sans-serif'>"
-                    f"{cache.long_description}</pre>"
+                    f"{_escape_markup(cache.long_description)}</pre>"
                 ))
         elif cache.short_description:
             if cache.short_desc_html:
@@ -677,7 +685,7 @@ class CacheDetailPanel(QWidget):
             else:
                 self._desc_view.setHtml(_wrap_html(
                     f"<pre style='white-space:pre-wrap;font-family:sans-serif'>"
-                    f"{cache.short_description}</pre>"
+                    f"{_escape_markup(cache.short_description)}</pre>"
                 ))
         else:
             self._desc_view.setHtml(_wrap_html(
@@ -860,6 +868,19 @@ class CacheDetailPanel(QWidget):
         except RuntimeError:
             # Widget er allerede slettet af Qt — intet at gøre
             pass
+
+
+def _escape_markup(text: str) -> str:
+    """Escape only what the browser would otherwise parse as a tag.
+
+    Deliberately *not* html.escape(): that also escapes '&', and a real
+    144,820-cache database has 323 description fields marked html="False"
+    that carry entity strings (&quot;, &amp;, &nbsp;). Those read as
+    encoding artefacts from geocaching.com/GSAK rather than text an owner
+    typed, so surfacing them literally looks like a bug to the user. '<'
+    and '>' are the two characters that actually cost content when parsed.
+    """
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _wrap_html(body: str) -> str:
