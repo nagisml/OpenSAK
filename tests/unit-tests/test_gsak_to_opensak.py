@@ -221,3 +221,96 @@ def _run(bb_path: Path, gsak_dir: Path, out_dir: Path) -> None:
         conv.main()
     finally:
         sys.argv = argv
+
+
+def _converted_dataset(tmp_path: Path) -> Path:
+    bb_path = tmp_path / "bb.db3"
+    _write_bb_db3(bb_path)
+    _write_country_zip(tmp_path / "country_v1.zip", "1", "United States")
+    _write_state_zip(tmp_path / "states" / "usa_v2.zip", "1", "California")
+    _write_county_zip(tmp_path / "counties" / "usa" / "california_v3.zip", "1", "Alpha County")
+    _write_county_zip(tmp_path / "counties" / "usa" / "texas_v5.zip", "2", "Beta County")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _run(bb_path, tmp_path, out_dir)
+    return out_dir
+
+
+def test_merge_state_folder_adds_baseline_pack(tmp_path: Path) -> None:
+    # Old GSAK loose state files (e.g. states/che): <state>.TXT, display name
+    # from '# GsakName=', one state split over several files as <name>_N.
+    out_dir = _converted_dataset(tmp_path)
+    src = tmp_path / "che"
+    src.mkdir()
+    (src / "Zurich.TXT").write_bytes(b"# GsakName=Z\xfcrich\n" + _SQUARE.encode())
+    (src / "Bern_1.txt").write_text("3.0,3.0\n3.0,4.0\n4.0,4.0\n4.0,3.0\n")
+    (src / "Bern_2.txt").write_text("3.0,4.0\n3.0,5.0\n4.0,5.0\n4.0,4.0\n")
+    # An exclave packed into the ring via an out-and-back bridge — GSAK's
+    # even-odd test keeps both parts; buffer(0) would not.
+    (src / "Fribourg.txt").write_text(
+        "10,10\n10,11\n11,11\n11,10.5\n11,12\n12,12\n12,13\n11,13\n11,12\n11,10.5\n11,10\n"
+    )
+
+    pack = conv.merge_region_folder(src, "state", "che", out_dir, 1, 0.0005)
+    assert pack == "che.geojson"
+
+    db = sqlite3.connect(out_dir / "boundaries.db")
+    rows = db.execute(
+        "SELECT name, parent, feature_index, is_bundled FROM region_state WHERE pack = ? ORDER BY id",
+        (pack,),
+    ).fetchall()
+    db.close()
+    assert rows == [("Bern", "che", 0, 1), ("Fribourg", "che", 1, 1), ("Zürich", "che", 2, 1)]
+
+    features = json.loads((out_dir / "states" / pack).read_text(encoding="utf-8"))["features"]
+    fribourg = conv._shp_shape(features[1]["geometry"])
+    assert fribourg.contains(conv._shp_shape({"type": "Point", "coordinates": [10.5, 10.5]}))
+    assert fribourg.contains(conv._shp_shape({"type": "Point", "coordinates": [12.5, 11.5]}))
+    assert features[0]["geometry"]["type"] == "Polygon"  # Bern_1 + Bern_2 dissolved
+
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert pack in manifest["baseline"]
+    assert pack not in manifest["packs"]
+
+
+def test_merge_county_folder_appends_pack_and_is_rerunnable(tmp_path: Path) -> None:
+    # Loose GSAK macro polygons (e.g. Schweiz_Gemeinden): <state>/<county>.txt,
+    # every '#' line starts a new section of the same county.
+    out_dir = _converted_dataset(tmp_path)
+
+    src = tmp_path / "Gemeinden"
+    (src / "AG").mkdir(parents=True)
+    (src / "BE").mkdir()
+    (src / "AG" / "Aarau.txt").write_text(f"#Aarau\n{_SQUARE}", encoding="utf-8")
+    # Two touching sections + a Latin-1 header, as in merged municipalities.
+    (src / "BE" / "Münsingen.txt").write_bytes(
+        b"#M\xfcnsingen\n3.0,3.0\n3.0,4.0\n4.0,4.0\n4.0,3.0\n"
+        b"#Fusionen 2017\n#Tr\xe4gertschi\n4.0,3.0\n4.0,4.0\n5.0,4.0\n5.0,3.0\n"
+    )
+
+    for _ in range(2):
+        pack = conv.merge_region_folder(src, "county", "che", out_dir, 23)
+    assert pack == "che_all_che.geojson"
+
+    db = sqlite3.connect(out_dir / "boundaries.db")
+    rows = db.execute(
+        "SELECT id, name, parent, feature_index FROM region_county WHERE pack = ? ORDER BY id",
+        (pack,),
+    ).fetchall()
+    assert [r[1:] for r in rows] == [("Aarau", "che", 0), ("Münsingen", "che", 1)]
+    assert rows[0][0] > 2  # appended after the bb.db3 counties, ids reused on re-run
+    assert db.execute("SELECT COUNT(*) FROM region_county").fetchone()[0] == 4
+    bbox = db.execute(
+        "SELECT min_lat, max_lat, min_lon, max_lon FROM rtree_county WHERE id = ?", (rows[1][0],)
+    ).fetchone()
+    assert bbox == (3.0, 5.0, 3.0, 4.0)
+    db.close()
+
+    features = json.loads((out_dir / "counties" / pack).read_text(encoding="utf-8"))["features"]
+    assert features[1]["geometry"]["type"] == "Polygon"  # sections dissolved into one
+
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["packs"][pack]["version"] == "23"
+    assert "usa_texas.geojson" in manifest["packs"]
+    db_bytes = (out_dir / "boundaries.db").read_bytes()
+    assert manifest["boundaries_db"]["sha256"] == hashlib.sha256(db_bytes).hexdigest()

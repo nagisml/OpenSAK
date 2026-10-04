@@ -21,6 +21,16 @@
 #          <out-dir>/states/<cc>.geojson             simplified baseline, one per country code
 #          <out-dir>/counties/<cc>_<pack>.geojson    full-resolution, on-demand (one per pack, flat)
 #
+# Regions GSAK ships as loose polygon files instead of a bb.db3 pack are merged
+# into an already converted <out-dir> as one more pack, e.g. the Swiss cantons
+# (old GSAK states/che/<canton>.txt) and municipalities (Schweiz_Gemeinden
+# macro: <DIR>/<canton>/<municipality>.txt):
+#   .venv/bin/python3 tools/boundaries/gsak_to_opensak.py --out-dir DATA \
+#       --merge-dir DIR --merge-layer state --merge-country che
+#   .venv/bin/python3 tools/boundaries/gsak_to_opensak.py --out-dir DATA \
+#       --merge-dir DIR --merge-layer county --merge-country che --merge-version 24
+# The generated packs are kept in tools/boundaries/packs/{states,counties}/.
+#
 # After this script finishes, BoundaryStore(Path("<out-dir>")) resolves
 # coordinates offline using the engine in src/opensak/geo/.
 
@@ -35,8 +45,11 @@ import unicodedata
 import zipfile
 from pathlib import Path
 
+import numpy as np
 from shapely.geometry import mapping as _shp_mapping
 from shapely.geometry import shape as _shp_shape
+from shapely.geometry import LineString
+from shapely.ops import polygonize, unary_union
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA = _REPO_ROOT / "data"
@@ -126,6 +139,78 @@ def _parse_gsak_txt(content: str) -> list[list[list[list[float]]]]:
         polygons.append(poly_rings)
 
     return polygons
+
+
+def _parse_gsak_loose_txt(content: str) -> list[list[list[list[float]]]]:
+    """Parse a stand-alone GSAK macro polygon file (e.g. Schweiz_Gemeinden).
+
+    Unlike the bb.db3 zips these have no '# Inclusion area' markers — every
+    '#<name>' comment line starts a new polygon (a municipality that absorbed
+    others keeps one section per former municipality). Returns one
+    single-ring polygon group per section, in the same shape as _parse_gsak_txt.
+    """
+    polygons: list[list[list[list[float]]]] = []
+    cur_ring: list[list[float]] = []
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if cur_ring:
+                polygons.append([cur_ring])
+                cur_ring = []
+            continue
+        parts = [p for p in re.split(r"[\s,]+", line) if p]
+        try:
+            cur_ring.append([float(parts[1]), float(parts[0])])  # [lon, lat]
+        except (ValueError, IndexError):
+            pass
+    if cur_ring:
+        polygons.append([cur_ring])
+    return [p for p in polygons if len(p[0]) >= 3]
+
+
+def _even_odd_ring(ring: list[list[float]]):
+    """Shapely geometry covering what GSAK's even-odd point-in-polygon treats as inside.
+
+    Loose GSAK files pack exclaves into one ring via out-and-back "bridge"
+    edges (e.g. Fribourg's enclaves inside Vaud). buffer(0) resolves such a
+    self-touching ring by winding, dropping or swallowing whole exclaves.
+    Instead: node the ring into faces and keep each face whose interior point
+    crosses the ring an odd number of times — exactly GSAK's semantics.
+    """
+    shp = _shp_shape({"type": "Polygon", "coordinates": [ring]})
+    if shp.is_valid:
+        return shp
+    closed = ring if ring[0] == ring[-1] else ring + [ring[0]]
+    xs = np.array([p[0] for p in closed])
+    ys = np.array([p[1] for p in closed])
+    x0, y0, x1, y1 = xs[:-1], ys[:-1], xs[1:], ys[1:]
+    inside = []
+    for face in polygonize(unary_union(LineString(closed))):
+        pt = face.representative_point()
+        straddles = (y0 > pt.y) != (y1 > pt.y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x_cross = x0 + (pt.y - y0) * (x1 - x0) / (y1 - y0)
+        if np.count_nonzero(straddles & (x_cross > pt.x)) % 2:
+            inside.append(face)
+    return unary_union(inside)
+
+
+def _union_geometry(polygons: list[list[list[list[float]]]]) -> dict[str, object]:
+    # Sections of a merged municipality share borders — dissolve them into one
+    # (Multi)Polygon so point-in-polygon never trips over the seams. Each part
+    # is repaired first; unary_union fails on invalid input.
+    parts = []
+    for rings in polygons:
+        shp = _even_odd_ring(rings[0])
+        if not shp.is_valid:
+            shp = shp.buffer(0)
+        if not shp.is_empty:
+            parts.append(shp)
+    if not parts:
+        return {"type": "Polygon", "coordinates": []}
+    return _simplify(_shp_mapping(unary_union(parts)), 0.0)
 
 
 def _split_antimeridian(ring: list[list[float]]) -> list[list[list[float]]]:
@@ -465,6 +550,114 @@ def _convert_counties(
     return pack_versions
 
 
+_GSAK_NAME_RE = re.compile(r"^#\s*GsakName\s*=\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _loose_region_name(txt: Path, content: str) -> str:
+    # '# GsakName=' (state files) carries the real display name — the file
+    # stem is ASCII-folded ("Graubunden", "BaselLand"). Without it the stem
+    # is the name (what GetPolygon() writes into GSAK's County field), minus
+    # the _1/_2 suffix GSAK uses to split one region over several files.
+    m = _GSAK_NAME_RE.search(content)
+    name = m.group(1) if m else re.sub(r"_\d+$", "", txt.stem)
+    return unicodedata.normalize("NFC", name)
+
+
+def merge_region_folder(
+    src_dir: Path,
+    layer: str,
+    cc: str,
+    out_dir: Path,
+    version: int,
+    simplify_tolerance: float = 0.0,
+) -> str:
+    """Add a folder of loose GSAK polygon files to an existing dataset as one pack.
+
+    For data that GSAK ships as loose polygon files instead of a bb.db3 pack:
+      layer="state":  <src>/<state>.txt — e.g. the old GSAK states/che folder;
+                      written as baseline states/<cc>.geojson (simplified).
+      layer="county": <src>/<state>/<county>.txt — e.g. Schweiz_Gemeinden;
+                      written as on-demand counties/<cc>_all_<cc>.geojson.
+    Files resolving to the same name are dissolved into one region. Rows go
+    into <out-dir>/boundaries.db and the pack is registered in manifest.json;
+    re-running replaces the previous run's rows. Returns the pack filename.
+    """
+    if layer not in ("state", "county"):
+        raise ValueError(f"unsupported layer: {layer}")
+    is_bundled = 1 if layer == "state" else 0
+    out_pack = f"{cc}.geojson" if layer == "state" else f"{cc}_all_{cc}.geojson"
+    pattern = "*" if layer == "state" else "*/*"
+    out_db = out_dir / "boundaries.db"
+    if not out_db.exists():
+        raise SystemExit(f"boundaries.db not found: {out_db} (run the full conversion first)")
+
+    # name -> polygon groups, in first-seen order
+    regions: dict[str, list[list[list[list[float]]]]] = {}
+    txts = [p for p in src_dir.glob(pattern) if p.is_file() and p.suffix.lower() == ".txt"]
+    for txt in sorted(txts, key=lambda p: (p.parent.name, p.stem.casefold())):
+        raw = txt.read_bytes()
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            content = raw.decode("latin-1")
+        name = _loose_region_name(txt, content)
+        regions.setdefault(name, []).extend(_parse_gsak_loose_txt(content))
+
+    conn = sqlite3.connect(out_db)
+    old_ids = [r[0] for r in conn.execute(
+        f"SELECT id FROM region_{layer} WHERE pack = ?", (out_pack,)
+    )]
+    for region_id in old_ids:
+        conn.execute(f"DELETE FROM rtree_{layer} WHERE id = ?", (region_id,))
+    conn.execute(f"DELETE FROM region_{layer} WHERE pack = ?", (out_pack,))
+    # Reuse the previous id block on a re-run so ids stay stable.
+    next_id = min(old_ids) if old_ids else (
+        conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM region_{layer}").fetchone()[0] + 1
+    )
+
+    features: list[dict[str, object]] = []
+    skipped = 0
+    for name, polygons in regions.items():
+        geom = _union_geometry(polygons)
+        if not geom.get("coordinates"):
+            skipped += 1
+            continue
+        # bbox from the full-resolution shape so simplification never shrinks
+        # the R-Tree box below the real boundary
+        min_lon, min_lat, max_lon, max_lat = _shp_shape(geom).bounds
+        geom = _simplify(geom, simplify_tolerance)
+        conn.execute(
+            f"INSERT INTO rtree_{layer} VALUES (?, ?, ?, ?, ?)",
+            (next_id, min_lat, max_lat, min_lon, max_lon),
+        )
+        conn.execute(
+            f"INSERT INTO region_{layer} VALUES (?, ?, ?, ?, ?, 1, ?)",
+            (next_id, name, cc, out_pack, len(features), is_bundled),
+        )
+        features.append(_feature(name, cc, geom, version))
+        next_id += 1
+    conn.commit()
+    conn.close()
+
+    out_path = out_dir / ("states" if layer == "state" else "counties") / out_pack
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    section = "baseline" if layer == "state" else "packs"
+    manifest_path = out_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    manifest["boundaries_db"] = _file_digest(out_db)
+    manifest.setdefault(section, {})[out_pack] = {"version": str(version), **_file_digest(out_path)}
+    manifest[section] = dict(sorted(manifest[section].items()))
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    print(f"  → {len(features)} {layer} regions in {out_pack}, {skipped} skipped")
+    return out_pack
+
+
 def _file_digest(path: Path) -> dict[str, object]:
     data = path.read_bytes()
     return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
@@ -542,7 +735,46 @@ def main() -> None:
              "since they're fetched on demand. 0 disables simplification "
              "(default: %(default)s, ~55m at the equator)",
     )
+    parser.add_argument(
+        "--merge-dir",
+        type=Path,
+        metavar="DIR",
+        help="Instead of a full conversion, merge a folder of loose GSAK polygon "
+             "files into the existing --out-dir dataset as one pack "
+             "(see --merge-layer)",
+    )
+    parser.add_argument(
+        "--merge-layer",
+        choices=("state", "county"),
+        default="county",
+        help="Layer for --merge-dir: 'state' reads <DIR>/<state>.txt, 'county' "
+             "reads <DIR>/<state>/<county>.txt, e.g. Schweiz_Gemeinden "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--merge-country",
+        metavar="CC",
+        help="Country code for --merge-dir (as in the dataset, e.g. che)",
+    )
+    parser.add_argument(
+        "--merge-version",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Polygon version recorded for --merge-dir (default: %(default)s)",
+    )
     args = parser.parse_args()
+    if args.merge_dir is not None:
+        if not args.merge_country:
+            parser.error("--merge-dir requires --merge-country")
+        print(f"Merging {args.merge_dir}…")
+        merge_region_folder(
+            args.merge_dir, args.merge_layer, args.merge_country, args.out_dir,
+            args.merge_version,
+            args.simplify_tolerance if args.merge_layer == "state" else 0.0,
+        )
+        return
+
     gsak_dir: Path = args.gsak_dir
     out_dir: Path = args.out_dir
     simplify_tolerance: float = args.simplify_tolerance

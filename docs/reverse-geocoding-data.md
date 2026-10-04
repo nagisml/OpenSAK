@@ -104,6 +104,31 @@ but complete `data/` directory (three counties, one state, one country) in a
 temp dir via `_build_boundaries()`. It is the authoritative, executable example
 of this contract — copy its output into `data/` for a working hand-made dataset.
 
+## Extra packs from loose GSAK polygon folders
+
+Some boundary data isn't part of GSAK's `bb.db3` set but comes as a folder of
+loose polygon files — e.g. the Swiss cantons (old GSAK `states/che/<canton>.TXT`)
+and municipalities (`Schweiz_Gemeinden` macro, `<canton>/<municipality>.txt`).
+Merge such a folder into an already converted dataset as one more pack:
+
+```
+python tools/boundaries/gsak_to_opensak.py --out-dir data \
+    --merge-dir <GSAK>/states/che --merge-layer state --merge-country che
+python tools/boundaries/gsak_to_opensak.py --out-dir data \
+    --merge-dir <GSAK>/Macros/Schweiz_Gemeinden --merge-layer county \
+    --merge-country che --merge-version 24
+```
+
+This appends the rows to `boundaries.db`, writes `states/che.geojson`
+(baseline, simplified like the other states) or `counties/che_all_che.geojson`
+(on-demand, full resolution) and registers it in `manifest.json`. The region
+name is the `# GsakName=` header if present, otherwise the file stem (what
+GSAK writes into the County field); files with the same name — `<name>_1`,
+`<name>_2`, or Moutier listed under both BE and JU — become one region.
+Self-touching rings (exclaves joined by out-and-back edges) are converted with
+GSAK's even-odd rule. Re-running replaces the previous rows. The generated
+packs are kept in `tools/boundaries/packs/{states,counties}/`.
+
 ## Verifying a release
 
 [`tools/boundaries/verify_release.py`](../tools/boundaries/verify_release.py)
