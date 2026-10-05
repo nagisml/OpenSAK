@@ -53,6 +53,12 @@ from opensak.filters.engine import (
     WhereClauseFilter,
 )
 from opensak.coords import parse_coords
+from opensak.export.file_export import select_for_export, write_export_file
+from opensak.export.file_export_settings import (
+    FileExportProfile,
+    FileExportSettings,
+    expand_file_name,
+)
 from opensak.macro.permissions import (
     FolderAccessDenied,
     FolderNotApproved,
@@ -243,6 +249,20 @@ class MacroHost(Protocol):
         but may defer that to end_macro() so a macro changing thousands of
         caches does not refresh the view thousands of times.
         """
+
+    def filtered_caches(self) -> list:
+        """The caches matching the active filter, in the order shown.
+
+        Like cache_count(), must be up to date right after apply_filter()/
+        clear_filter() — ask the database, not the UI.
+        """
+
+    def filter_name(self) -> str:
+        """Name of the active filter ("" = none) — the {filter} variable of
+        an export file name."""
+
+    def database_name(self) -> str:
+        """Name of the active database — the {database} variable."""
 
     def confirm(self, message: str) -> bool:
         """Ask the user a Yes/No question; True on Yes."""
@@ -437,6 +457,7 @@ class MacroRuntime:
         host: MacroHost,
         output: Optional[Callable[[str], None]] = None,
         profiles_dir: Optional[Path] = None,
+        export_settings_dir: Optional[Path] = None,
         instruction_limit: int = DEFAULT_INSTRUCTION_LIMIT,
         memory_limit: int = DEFAULT_MEMORY_LIMIT,
         folder_permissions: Optional[list[FolderPermission]] = None,
@@ -448,6 +469,7 @@ class MacroRuntime:
         self._host = host
         self._output = output or print
         self._profiles_dir = profiles_dir
+        self._export_settings_dir = export_settings_dir
         self._instruction_limit = instruction_limit
         self._memory_limit = memory_limit
         self._folder_permissions = folder_permissions
@@ -576,6 +598,54 @@ class MacroRuntime:
             return check_access(path, write=write, permissions=self._run_permissions)
         except FolderAccessDenied as exc:
             raise MacroError(str(exc)) from None
+
+    def _load_export_settings(self, name: str) -> FileExportSettings:
+        for path in FileExportProfile.list_profiles(self._export_settings_dir):
+            try:
+                profile = FileExportProfile.load(path)
+            except Exception:
+                continue
+            if profile.name == name:
+                return profile.settings
+        raise MacroError(f"no saved export setting named {name!r}")
+
+    def _export_file(self, name=None):
+        if not isinstance(name, str) or not name.strip():
+            raise MacroError("opensak.export_file expects the name of a saved export setting")
+        settings = self._load_export_settings(name)
+        if not settings.folder.strip():
+            raise MacroError(
+                f"export setting {name!r} has no folder — choose one in the "
+                "export dialog and save the setting again"
+            )
+        caches = select_for_export(self._host.filtered_caches(), settings.max_records)
+        if not caches:
+            return None
+        file_name = expand_file_name(
+            settings.file_name,
+            database=self._host.database_name(),
+            filter_name=self._host.filter_name(),
+            fmt=settings.fmt,
+            count=len(caches),
+        )
+        folder = Path(settings.folder.strip()).expanduser()
+        target = self._check_access(folder / f"{file_name}.{settings.fmt}", write=True)
+        if target.exists():
+            if settings.if_exists == "skip":
+                return None
+            if settings.if_exists == "ask":
+                from opensak.lang import tr
+
+                if not self._host.confirm(tr("file_export_overwrite_msg", path=str(target))):
+                    return None
+        try:
+            count = write_export_file(
+                caches, target, settings.fmt,
+                use_corrected=settings.use_corrected_coords,
+            )
+        except OSError as exc:
+            raise MacroError(f"cannot write {target}: {exc}") from None
+        return str(target), count
 
     # -- Running ---------------------------------------------------------------
 
@@ -823,6 +893,27 @@ API: tuple[ApiFunction, ...] = (
                   optional=True),
         ),
         returns=("table<string, string>[]", "One table per data row, keyed by header."),
+    ),
+    ApiFunction(
+        name="export_file",
+        description="Export the caches of the active filter with a saved export "
+                    "setting (File → Export → GPX/LOC/GGZ: format, folder, file "
+                    "name, if the file exists, corrected coordinates, max. "
+                    "caches). The file name variables are filled in as in the "
+                    "dialog, {filter} with the name of the active filter. The "
+                    "setting needs a folder, and that folder needs write "
+                    "permission (Settings → Folder permissions). Nothing is "
+                    "written when no cache with coordinates is shown, or when "
+                    "the file exists and the setting says skip (or ask, and "
+                    "the user answers No).",
+        example='local path, n = opensak.export_file("GPX Export")\n'
+                'if path then print(n .. " caches → " .. path) end',
+        since=1,
+        bind=lambda rt, lua: rt._export_file,
+        params=(Param("setting", "string", "Name of the saved export setting."),),
+        returns=("string?, integer?",
+                 "The file written and the number of caches in it; nil if "
+                 "nothing was written."),
     ),
     ApiFunction(
         name="confirm",

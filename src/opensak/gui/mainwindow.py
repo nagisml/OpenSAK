@@ -3275,6 +3275,24 @@ class MainWindow(QMainWindow):
         with get_session() as session:
             return len(apply_filters_auto(session, self._build_active_filterset()))
 
+    def filtered_caches(self) -> list:
+        """MacroHost: caches matching the active filter, in table order —
+        from the database for the same reason as cache_count()."""
+        with get_session() as session:
+            return apply_filters_auto(
+                session, self._build_active_filterset(), self._current_sort,
+                columns=self._visible_table_columns(),
+            )
+
+    def filter_name(self) -> str:
+        """MacroHost: name of the active filter ("" = none)."""
+        return self._active_filter_name
+
+    def database_name(self) -> str:
+        """MacroHost: name of the active database."""
+        from opensak.export.file_export import active_database_name
+        return active_database_name()
+
     def set_corrected_coords(self, gc_code, lat, lon) -> bool:
         """MacroHost: set (or clear, with lat/lon = None) corrected coordinates.
 

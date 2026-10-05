@@ -21,6 +21,7 @@ See [Example macros](#example-macros) for complete scripts and [Editor support](
 | [`opensak.set_corrected`](#opensaksetcorrected) | 1 |
 | [`opensak.clear_corrected`](#opensakclearcorrected) | 1 |
 | [`opensak.read_csv`](#opensakreadcsv) | 1 |
+| [`opensak.export_file`](#opensakexportfile) | 1 |
 | [`opensak.confirm`](#opensakconfirm) | 1 |
 | [`opensak.choose_file`](#opensakchoosefile) | 1 |
 | [`opensak.temp_dir`](#opensaktempdir) | 1 |
@@ -219,6 +220,29 @@ for _, row in ipairs(opensak.read_csv("solved.csv")) do
 end
 ```
 
+### opensak.export_file
+
+```lua
+opensak.export_file(setting)
+```
+
+Export the caches of the active filter with a saved export setting (File → Export → GPX/LOC/GGZ: format, folder, file name, if the file exists, corrected coordinates, max. caches). The file name variables are filled in as in the dialog, {filter} with the name of the active filter. The setting needs a folder, and that folder needs write permission (Settings → Folder permissions). Nothing is written when no cache with coordinates is shown, or when the file exists and the setting says skip (or ask, and the user answers No).
+
+Parameters:
+
+- `setting` (`string`) — Name of the saved export setting.
+
+Returns `string?, integer?` — The file written and the number of caches in it; nil if nothing was written.
+
+Since API version 1.
+
+Example:
+
+```lua
+local path, n = opensak.export_file("GPX Export")
+if path then print(n .. " caches → " .. path) end
+```
+
 ### opensak.confirm
 
 ```lua
@@ -326,6 +350,7 @@ Keys understood by `opensak.filter{}`, all combined with AND.
 Ready-to-use scripts to copy and adapt are in [`macros/examples/`](../../macros/examples/). Each one starts with a comment explaining what it does and which files it expects.
 
 - [`corrected_coords_from_csv.lua`](../../macros/examples/corrected_coords_from_csv.lua) — set corrected coordinates from a CSV file
+- [`export_filters_to_gpx.lua`](../../macros/examples/export_filters_to_gpx.lua) — one GPX file per saved filter
 
 ## Editor support (VS Code)
 
