@@ -54,7 +54,7 @@ from opensak.filters.engine import (
     apply_filters_auto,
 )
 from opensak.coords import parse_coords
-from opensak.db.database import get_session
+from opensak.db.database import get_engine, get_session
 from opensak.export.file_export import select_for_export, write_export_file
 from opensak.export.file_export_settings import (
     FileExportProfile,
@@ -84,6 +84,7 @@ from opensak.macro.permissions import (
     temp_dir,
     with_grant,
 )
+from opensak.macro.sql import MAX_ROWS, QUERY_TIMEOUT_S, ReadOnlyDatabase, SqlError
 from opensak.utils.constants import CACHE_TYPES
 
 # A runaway `while true do end` would freeze the GUI thread, so the script is
@@ -396,6 +397,25 @@ def _cache_fields(value: Any) -> tuple[CacheField, ...]:
         raise MacroError(str(exc)) from None
 
 
+def _sql_args(func: str, query: Any, params: Any) -> tuple[str, Any]:
+    """Check the arguments of opensak.sql()/sql_each(); a Lua params table
+    becomes a list (for ?) or a dict (for :name)."""
+    if not isinstance(query, str) or not query.strip():
+        raise MacroError(f"{func} expects an SQL query")
+    if params is None:
+        return query, None
+    if not hasattr(params, "items"):
+        raise MacroError(f"{func}: parameters must be a table, e.g. {{ 1, \"text\" }}")
+    items = dict(params.items())
+    if all(isinstance(k, str) for k in items):
+        return query, items
+    if all(isinstance(k, int) for k in items) and sorted(items) == list(range(1, len(items) + 1)):
+        return query, [items[i] for i in range(1, len(items) + 1)]
+    raise MacroError(
+        f"{func}: parameters must be an array {{ v1, v2 }} or a table {{ name = v }}, not both"
+    )
+
+
 def _number(value: Any) -> Optional[float]:
     """A Lua number, or a string holding one (CSV cells are strings)."""
     if isinstance(value, bool):
@@ -509,6 +529,8 @@ class MacroRuntime:
         # (file, write) picked by the user in opensak.choose_file() — usable
         # for the rest of this run only, whatever the folder list says
         self._picked: set[tuple[Path, bool]] = set()
+        # Opened by the first opensak.sql*() call of a run, closed after it.
+        self._sql_db: Optional[ReadOnlyDatabase] = None
 
     # -- API functions exposed to Lua -----------------------------------------
 
@@ -599,6 +621,50 @@ class MacroRuntime:
         with get_session() as session:
             description = load_description(session, gc_code)
         return lua.table_from(description) if description else None
+
+    # Raw SQL: a separate read-only connection (sql.py), opened on first use.
+
+    def _sql(self) -> ReadOnlyDatabase:
+        if self._sql_db is None:
+            self._sql_db = ReadOnlyDatabase(Path(get_engine().url.database or ""))
+        return self._sql_db
+
+    def _query(self, lua, query=None, params=None):
+        query, params = _sql_args("opensak.sql", query, params)
+        try:
+            rows = self._sql().query(query, params)
+        except SqlError as exc:
+            raise MacroError(str(exc)) from None
+        return lua.table_from([lua.table_from(r) for r in rows])
+
+    def _query_each(self, lua, query=None, params=None):
+        query, params = _sql_args("opensak.sql_each", query, params)
+        rows = self._sql().iterate(query, params)
+
+        def step(*_):
+            try:
+                row = next(rows, None)
+            except SqlError as exc:
+                raise MacroError(str(exc)) from None
+            return None if row is None else lua.table_from(row)
+
+        # The query runs on the first step, so errors surface in the loop.
+        return self._wrap(step)
+
+    def _tables(self, lua):
+        try:
+            return lua.table_from(self._sql().tables())
+        except SqlError as exc:
+            raise MacroError(str(exc)) from None
+
+    def _columns(self, lua, table=None):
+        if not isinstance(table, str) or not table.strip():
+            raise MacroError("opensak.columns expects a table name")
+        try:
+            columns = self._sql().columns(table)
+        except SqlError as exc:
+            raise MacroError(str(exc)) from None
+        return lua.table_from([lua.table_from(c) for c in columns])
 
     def _confirm(self, message=None) -> bool:
         if not isinstance(message, str) or not message.strip():
@@ -782,6 +848,9 @@ class MacroRuntime:
             # attribute_filter) propagates as itself, not as a LuaError.
             raise MacroError(f"{type(exc).__name__}: {exc}") from exc
         finally:
+            if self._sql_db is not None:
+                self._sql_db.close()
+                self._sql_db = None
             self._host.end_macro()
 
     @staticmethod
@@ -993,6 +1062,64 @@ API: tuple[ApiFunction, ...] = (
         returns=("{short: string?, long: string?, html: boolean}?",
                  "Short and long description and whether they are HTML; "
                  "nil if the cache is not in the database."),
+    ),
+    ApiFunction(
+        name="sql",
+        description="Run a read-only SQL query (SQLite) against the active "
+                    "database and return all rows. Only reading statements "
+                    "are allowed; the connection itself is read-only. "
+                    "Column names follow the database schema, which may "
+                    "change between versions (see opensak.tables() and "
+                    "opensak.columns()). Use `AS` to name computed columns. "
+                    "NULL values are nil. At most "
+                    f"{MAX_ROWS:,} rows; use opensak.sql_each() for more. A "
+                    f"query is aborted after {QUERY_TIMEOUT_S:g} s.",
+        example='local rows = opensak.sql(\n'
+                '  "SELECT country, COUNT(*) AS n FROM caches WHERE found = ? GROUP BY country", { 1 })\n'
+                "for _, r in ipairs(rows) do print(r.country, r.n) end",
+        since=2,
+        bind=lambda rt, lua: lambda *a: rt._query(lua, *a),
+        params=(
+            Param("query", "string", "One SQL statement."),
+            Param("params", "table",
+                  "Values for `?` placeholders ({ v1, v2 }) or for `:name` "
+                  "placeholders ({ name = v }).",
+                  optional=True),
+        ),
+        returns=("table<string, any>[]", "One table per row, keyed by column name."),
+    ),
+    ApiFunction(
+        name="sql_each",
+        description="Like opensak.sql(), but returns an iterator for a "
+                    "generic `for` that fetches the rows in chunks — for "
+                    "results of any size.",
+        example='for r in opensak.sql_each("SELECT gc_code, name FROM caches WHERE found = 0") do\n'
+                "    print(r.gc_code, r.name)\nend",
+        since=2,
+        bind=lambda rt, lua: lambda *a: rt._query_each(lua, *a),
+        params=(
+            Param("query", "string", "One SQL statement."),
+            Param("params", "table", "As for opensak.sql().", optional=True),
+        ),
+        returns=("fun(): table<string, any>?", "Iterator for a generic `for`."),
+    ),
+    ApiFunction(
+        name="tables",
+        description="The tables and views of the active database, for use "
+                    "with opensak.sql().",
+        example='print(table.concat(opensak.tables(), ", "))',
+        since=2,
+        bind=lambda rt, lua: lambda: rt._tables(lua),
+        returns=("string[]", "Table and view names, sorted."),
+    ),
+    ApiFunction(
+        name="columns",
+        description="The columns of a table or view of the active database.",
+        example='for _, c in ipairs(opensak.columns("caches")) do print(c.name, c.type) end',
+        since=2,
+        bind=lambda rt, lua: lambda *a: rt._columns(lua, *a),
+        params=(Param("table", "string", "Table or view name."),),
+        returns=("{name: string, type: string}[]", "Column names and SQL types, in table order."),
     ),
     ApiFunction(
         name="set_corrected",
