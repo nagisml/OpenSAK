@@ -424,6 +424,7 @@ def test_mainwindow_batches_macro_refresh(n, row_refreshes, full_reloads):
     calls = {"row": [], "full": 0, "detail": []}
     win = SimpleNamespace(
         _macro_changed_codes={f"GC{i}" for i in range(n)},
+        _macro_caches_removed=False,
         _on_corrected_coords_changed=calls["row"].append,
         _refresh_cache_list=lambda: calls.__setitem__("full", calls["full"] + 1),
         _detail_panel=SimpleNamespace(_current_gc_code="GC1",
@@ -436,6 +437,23 @@ def test_mainwindow_batches_macro_refresh(n, row_refreshes, full_reloads):
     assert calls["full"] == full_reloads
     assert calls["detail"] == (["GC1"] if full_reloads else [])
     assert win._macro_changed_codes == set()
+
+
+def test_mainwindow_reloads_once_after_macro_moved_caches():
+    from types import SimpleNamespace
+    from opensak.gui import mainwindow as mw
+
+    calls = {"row": [], "moved": 0}
+    win = SimpleNamespace(
+        _macro_changed_codes={"GC1"},
+        _macro_caches_removed=True,
+        _on_corrected_coords_changed=calls["row"].append,
+        _on_caches_moved=lambda: calls.__setitem__("moved", calls["moved"] + 1),
+    )
+    mw.MainWindow.end_macro(win)
+
+    assert calls == {"row": [], "moved": 1}
+    assert win._macro_changed_codes == set() and win._macro_caches_removed is False
 
 
 @pytest.mark.parametrize("script", sorted(EXAMPLES.glob("*.lua")), ids=lambda p: p.name)
@@ -716,13 +734,13 @@ def test_cache_returns_snapshot_with_api_field_names(full_cache):
         print(opensak.cache("GCACC1").name, opensak.cache("GCNONE"))
     """)
     assert out == [
-        "GCACC1	All fields	Unknown Cache	Small	47.1	8.2	2.5	3",
-        "Owner	Placer	2020-05-17	true	2024-01-02	true	true",
-        "false	nil	false	Switzerland	Zürich	nil	nil",
-        "true	7	4	true	Solved",
-        "#FF5733	my note	under the stone	https://coord.info/GCACC1	47.2	8.3",
-        "12.5	90	2	5	2025-03-04",
-        "All fields	nil",
+        "GCACC1\tAll fields\tUnknown Cache\tSmall\t47.1\t8.2\t2.5\t3",
+        "Owner\tPlacer\t2020-05-17\ttrue\t2024-01-02\ttrue\ttrue",
+        "false\tnil\tfalse\tSwitzerland\tZürich\tnil\tnil",
+        "true\t7\t4\ttrue\tSolved",
+        "#FF5733\tmy note\tunder the stone\thttps://coord.info/GCACC1\t47.2\t8.3",
+        "12.5\t90\t2\t5\t2025-03-04",
+        "All fields\tnil",
     ]
 
 
@@ -745,7 +763,7 @@ def test_caches_iterates_active_filter_in_order():
         for c in opensak.caches() do print(c.code, c.difficulty) end
         print(table.concat(opensak.codes(), ","))
     """, host=host)
-    assert out == ["GCMAC1	1.5", "GCMAC2	4", "GCMAC4	1", "GCMAC1,GCMAC2,GCMAC4"]
+    assert out == ["GCMAC1\t1.5", "GCMAC2\t4", "GCMAC4\t1", "GCMAC1,GCMAC2,GCMAC4"]
 
 
 def test_caches_with_filter_keys_leaves_view_unchanged():
@@ -758,7 +776,7 @@ def test_caches_with_filter_keys_leaves_view_unchanged():
             print(c.code, table.concat(keys, ","))
         end
     """, host=host)
-    assert out == [f"GCMAC{i}	code,difficulty" for i in (1, 2, 3, 5)]
+    assert out == [f"GCMAC{i}\tcode,difficulty" for i in (1, 2, 3, 5)]
     assert host.selected == set() and host.label == ""
 
 
@@ -791,8 +809,8 @@ def test_current_and_selected_follow_host():
     _, out2 = _run("""
         print(opensak.current().name, opensak.selected()[1])
     """, host=host)
-    assert out == ["nil	0"]
-    assert out2 == ["GCMAC3	GCMAC3"]
+    assert out == ["nil\t0"]
+    assert out2 == ["GCMAC3\tGCMAC3"]
 
 
 def test_description(full_cache):
@@ -800,7 +818,7 @@ def test_description(full_cache):
         local d = opensak.description("GCACC1")
         print(d.short, d.long, d.html, opensak.description("GCNONE"))
     """)
-    assert out == ["short	<p>long</p>	true	nil"]
+    assert out == ["short\t<p>long</p>\ttrue\tnil"]
 
 
 # ── Raw SQL, read-only ───────────────────────────────────────────────────────
