@@ -5,6 +5,7 @@ DB-backed host applies the FilterSet the macro built against a real test
 database, so "a Lua script selects caches" is covered end to end.
 """
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,13 +13,14 @@ import pytest
 
 from opensak.db.corrected_coords import set_corrected_coords
 from opensak.db.database import get_session
-from opensak.db.models import Cache
+from opensak.db.models import Cache, UserNote
 from opensak.export.file_export_settings import FileExportProfile, FileExportSettings
 from opensak.filters.engine import (
     CacheTypeFilter, DifficultyFilter, FilterProfile, FilterSet, GcCodeFilter,
     NotFoundFilter, apply_filters_auto,
 )
 from opensak.macro import FolderApproval, MacroError, MacroRuntime, build_filterset
+from opensak.macro import cache_data
 from opensak.macro.permissions import FolderPermission
 
 
@@ -56,6 +58,14 @@ class FakeHost:
         self.corrected = getattr(self, "corrected", [])
         self.corrected.append((gc_code, lat, lon))
         return gc_code != "GCNONE"
+
+    current: str | None = None
+
+    def current_code(self):
+        return self.current
+
+    def selected_codes(self):
+        return [self.current] if self.current else []
 
     answer = True
 
@@ -666,3 +676,128 @@ def test_export_example_stops_when_file_name_lacks_filter(tmp_path):
 
     with pytest.raises(MacroError, match="Traditionals and Multi-caches both exported to"):
         _run_export_example(runtime)
+
+
+# ── Cache access ─────────────────────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def full_cache(seed):
+    """One cache with every kind of field filled in."""
+    with get_session() as s:
+        cache = Cache(
+            gc_code="GCACC1", name="All fields", cache_type="Unknown Cache",
+            container="Small", latitude=47.1, longitude=8.2, difficulty=2.5,
+            terrain=3.0, owner_name="Owner", placed_by="Placer",
+            hidden_date=datetime(2020, 5, 17, 13, 45), found=True,
+            found_date=datetime(2024, 1, 2), first_to_find=True, premium_only=True,
+            country="Switzerland", state="Zürich", distance=12.5, bearing=90.0,
+            user_flag=True, user_sort=7, user_data_2="Solved", color="#FF5733",
+            encoded_hints="under the stone", url="https://coord.info/GCACC1",
+            short_description="short", long_description="<p>long</p>",
+            long_desc_html=True, waypoint_count=2, log_count=5,
+            last_log_date=datetime(2025, 3, 4, 10, 0),
+        )
+        s.add(cache)
+        s.flush()
+        s.add(UserNote(cache_id=cache.id, note="my note"))
+    set_corrected_coords("GCACC1", 47.2, 8.3)
+
+
+def test_cache_returns_snapshot_with_api_field_names(full_cache):
+    _, out = _run("""
+        local c = opensak.cache("gcacc1")
+        print(c.code, c.name, c.type, c.container, c.lat, c.lon, c.difficulty, c.terrain)
+        print(c.owner, c.placed_by, c.hidden, c.found, c.found_date, c.ftf, c.premium)
+        print(c.dnf, c.dnf_date, c.archived, c.country, c.state, c.county, c.favorite_points)
+        print(c.user_flag, c.user_sort, #c.user_data, c.user_data[1] == "", c.user_data[2])
+        print(c.color, c.note, c.hint, c.url, c.corrected.lat, c.corrected.lon)
+        print(c.distance, c.bearing, c.waypoint_count, c.log_count, c.last_log_date)
+        c.name = "changed"
+        print(opensak.cache("GCACC1").name, opensak.cache("GCNONE"))
+    """)
+    assert out == [
+        "GCACC1	All fields	Unknown Cache	Small	47.1	8.2	2.5	3",
+        "Owner	Placer	2020-05-17	true	2024-01-02	true	true",
+        "false	nil	false	Switzerland	Zürich	nil	nil",
+        "true	7	4	true	Solved",
+        "#FF5733	my note	under the stone	https://coord.info/GCACC1	47.2	8.3",
+        "12.5	90	2	5	2025-03-04",
+        "All fields	nil",
+    ]
+
+
+def test_every_cache_field_is_loaded(full_cache):
+    with get_session() as s:
+        (record,) = cache_data.load_records(s, ["GCACC1"])
+    assert tuple(record) == cache_data.FIELD_NAMES
+    assert record["corrected"] == {"lat": 47.2, "lon": 8.3}
+
+
+def test_cache_without_corrected_coords_has_nil_corrected():
+    _, out = _run('print(opensak.cache("GCMAC1").corrected)')
+    assert out == ["nil"]
+
+
+def test_caches_iterates_active_filter_in_order():
+    host = DbHost()
+    _, out = _run("""
+        opensak.filter{ type = "Traditional", code = "GCMAC" }
+        for c in opensak.caches() do print(c.code, c.difficulty) end
+        print(table.concat(opensak.codes(), ","))
+    """, host=host)
+    assert out == ["GCMAC1	1.5", "GCMAC2	4", "GCMAC4	1", "GCMAC1,GCMAC2,GCMAC4"]
+
+
+def test_caches_with_filter_keys_leaves_view_unchanged():
+    host = DbHost()
+    _, out = _run("""
+        for c in opensak.caches{ code = "GCMAC", found = false, fields = {"difficulty"} } do
+            local keys = {}
+            for k in pairs(c) do keys[#keys + 1] = k end
+            table.sort(keys)
+            print(c.code, table.concat(keys, ","))
+        end
+    """, host=host)
+    assert out == [f"GCMAC{i}	code,difficulty" for i in (1, 2, 3, 5)]
+    assert host.selected == set() and host.label == ""
+
+
+def test_caches_loads_in_chunks(monkeypatch):
+    monkeypatch.setattr(cache_data, "CHUNK_SIZE", 2)
+    _, out = _run("""
+        local codes = {}
+        for c in opensak.caches{ code = "GCMAC", fields = {"code"} } do codes[#codes + 1] = c.code end
+        print(table.concat(codes, ","))
+    """)
+    assert out == ["GCMAC1,GCMAC2,GCMAC3,GCMAC4,GCMAC5"]
+
+
+@pytest.mark.parametrize("call,msg", [
+    ('opensak.caches{ fields = {"code", "bogus"} }', r"unknown cache field\(s\) \['bogus'\]"),
+    ('opensak.caches{ bogus = 1 }', "unknown filter key"),
+    ('opensak.caches("GC1")', "expects nothing or a table"),
+    ("opensak.cache()", "opensak.cache expects a GC code"),
+    ("opensak.description(1)", "opensak.description expects a GC code"),
+])
+def test_cache_access_rejects_bad_input(call, msg):
+    with pytest.raises(MacroError, match=msg):
+        _run(call)
+
+
+def test_current_and_selected_follow_host():
+    host = FakeHost()
+    _, out = _run("print(opensak.current(), #opensak.selected())", host=host)
+    host.current = "GCMAC3"
+    _, out2 = _run("""
+        print(opensak.current().name, opensak.selected()[1])
+    """, host=host)
+    assert out == ["nil	0"]
+    assert out2 == ["GCMAC3	GCMAC3"]
+
+
+def test_description(full_cache):
+    _, out = _run("""
+        local d = opensak.description("GCACC1")
+        print(d.short, d.long, d.html, opensak.description("GCNONE"))
+    """)
+    assert out == ["short	<p>long</p>	true	nil"]

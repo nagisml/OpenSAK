@@ -65,6 +65,21 @@ def test_macro_export_file_writes_caches_of_active_filter(seeded_window, tmp_pat
     assert codes and all(code in content for code in codes)
 
 
+def test_macro_reads_selected_cache_and_filtered_codes(seeded_window):
+    _run_macro(seeded_window, 'opensak.filter{ code = "GCAAA0" }')
+    table = seeded_window._cache_table
+    shown = [table._model.cache_at(i).gc_code for i in range(table.row_count())]
+    table.select_by_gc_code(shown[1])
+
+    out = _run_macro(seeded_window, """
+        local c = opensak.current()
+        print(c.code, c.name == opensak.cache(c.code).name, table.concat(opensak.selected(), ","))
+        print(table.concat(opensak.codes(), ","))
+    """)
+
+    assert out.splitlines()[:2] == [f"{shown[1]}\ttrue\t{shown[1]}", ",".join(shown)]
+
+
 
 
 @pytest.fixture
