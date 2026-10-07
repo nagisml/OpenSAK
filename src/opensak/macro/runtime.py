@@ -264,6 +264,10 @@ class MacroHost(Protocol):
     def database_name(self) -> str:
         """Name of the active database — the {database} variable."""
 
+    def center_name(self) -> str:
+        """Name of the active centre point ("" = none) — the {center}
+        variable."""
+
     def confirm(self, message: str) -> bool:
         """Ask the user a Yes/No question; True on Yes."""
 
@@ -625,6 +629,7 @@ class MacroRuntime:
             settings.file_name,
             database=self._host.database_name(),
             filter_name=self._host.filter_name(),
+            center_name=self._host.center_name(),
             fmt=settings.fmt,
             count=len(caches),
         )
@@ -900,7 +905,8 @@ API: tuple[ApiFunction, ...] = (
                     "setting (File → Export → GPX/LOC/GGZ: format, folder, file "
                     "name, if the file exists, corrected coordinates, max. "
                     "caches). The file name variables are filled in as in the "
-                    "dialog, {filter} with the name of the active filter. The "
+                    "dialog, {filter} with the name of the active filter and "
+                    "{center} with the active centre point. The "
                     "setting needs a folder, and that folder needs write "
                     "permission (Settings → Folder permissions). Nothing is "
                     "written when no cache with coordinates is shown, or when "

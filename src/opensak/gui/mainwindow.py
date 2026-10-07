@@ -3293,6 +3293,10 @@ class MainWindow(QMainWindow):
         from opensak.export.file_export import active_database_name
         return active_database_name()
 
+    def center_name(self) -> str:
+        """MacroHost: name of the active centre point ("" = none)."""
+        return get_settings().active_home_name or ""
+
     def set_corrected_coords(self, gc_code, lat, lon) -> bool:
         """MacroHost: set (or clear, with lat/lon = None) corrected coordinates.
 

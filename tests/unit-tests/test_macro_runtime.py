@@ -49,6 +49,9 @@ class FakeHost:
     def database_name(self):
         return "TestDB"
 
+    def center_name(self):
+        return "Home"
+
     def set_corrected_coords(self, gc_code, lat, lon):
         self.corrected = getattr(self, "corrected", [])
         self.corrected.append((gc_code, lat, lon))
@@ -521,12 +524,12 @@ def _exported(path: Path) -> set[str]:
 
 
 def test_export_file_writes_caches_of_active_filter(tmp_path):
-    runtime, out = _export_runtime(tmp_path, file_name="{filter}_{count}_{database}")
+    runtime, out = _export_runtime(tmp_path, file_name="{filter}_{count}_{database}_{center}")
     runtime.run("""
         opensak.filter{ type = "Multi-cache", label = "Multis" }
         print(opensak.export_file("GPX Export"))
     """)
-    target = (tmp_path / "out" / "Multis_1_TestDB.gpx").resolve()
+    target = (tmp_path / "out" / "Multis_1_TestDB_Home.gpx").resolve()
     assert out == [f"{target}\t1"]
     assert _exported(target) == {"GCMAC3"}
 

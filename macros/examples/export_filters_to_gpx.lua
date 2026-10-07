@@ -11,7 +11,7 @@
 --      as "GPX Export". Without {filter} every filter would write the same
 --      file — the macro stops when that happens.
 --   2. Settings → Folder permissions: give that folder write permission
---      (the system temp folder has it by default).
+--      (opensak.temp_dir() has it by default).
 --   3. Put the names of three of your saved filters into FILTERS below.
 --
 -- A filter that is not saved, or that matches no cache, is skipped: with no
