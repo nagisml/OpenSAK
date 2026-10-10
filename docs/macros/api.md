@@ -42,6 +42,8 @@ See [Example macros](#example-macros) for complete scripts and [Editor support](
 | [`opensak.update`](#opensakupdate) | 3 |
 | [`opensak.insert`](#opensakinsert) | 3 |
 | [`opensak.sql_write`](#opensaksqlwrite) | 3 |
+| [`opensak.transaction`](#opensaktransaction) | 3 |
+| [`opensak.in_transaction`](#opensakintransaction) | 3 |
 | [`opensak.read_csv`](#opensakreadcsv) | 1 |
 | [`opensak.export_file`](#opensakexportfile) | 2 |
 | [`opensak.export_gpx`](#opensakexportgpx) | 2 |
@@ -716,7 +718,7 @@ opensak.insert{ code = "GC12345", name = "My bonus", type = "Unknown",
 opensak.sql_write(query [, params])
 ```
 
-Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own, or not at all on an error. Needs the user's permission like opensak.update().
+Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own (or with the surrounding opensak.transaction()), or not at all on an error. BEGIN, COMMIT and the like are refused; use opensak.transaction(). Needs the user's permission like opensak.update().
 
 Parameters:
 
@@ -734,6 +736,59 @@ local n = opensak.sql_write(
   "UPDATE caches SET user_data_1 = ? WHERE country = ? AND found = 0",
   { "todo", "Switzerland" })
 print(n .. " caches marked")
+```
+
+### opensak.transaction
+
+```lua
+opensak.transaction(fn)
+```
+
+Run *fn* as one transaction: every change it makes to the active database (opensak.update, insert, sql_write, set_corrected, clear_corrected) is kept when *fn* returns, and all of it is undone if *fn* raises an error, which opensak.transaction() then raises again. Many changes in one transaction are also faster than the same changes committed one by one. Inside *fn*, opensak.cache, caches, sql and the like see the changes already made; everything else in OpenSAK, exports included, sees them only afterwards. A transaction inside another one is undone on its own on an error, and kept with the outer one otherwise. opensak.switch_database, move_caches and copy_caches cannot be used inside. Needs the user's permission like opensak.update(). A macro that ends inside a transaction (e.g. cancelled) keeps none of it.
+
+Parameters:
+
+- `fn` (`fun()`) — The function to run.
+
+Returns `any...` — What *fn* returns.
+
+Since API version 3.
+
+Example:
+
+```lua
+local n = opensak.transaction(function()
+    local n = 0
+    for c in opensak.caches{ found = true, fields = {"code"} } do
+        opensak.update(c.code, { user_flag = true })
+        n = n + 1
+    end
+    return n
+end)
+print(n .. " caches flagged")
+-- error() inside the function undoes everything it changed:
+local ok, err = pcall(opensak.transaction, function()
+    opensak.update("GC12345", { user_flag = true })
+    error("changed my mind")
+end)
+```
+
+### opensak.in_transaction
+
+```lua
+opensak.in_transaction()
+```
+
+Whether the macro is inside opensak.transaction().
+
+Returns `boolean` — true inside opensak.transaction().
+
+Since API version 3.
+
+Example:
+
+```lua
+if not opensak.in_transaction() then print("each change is committed on its own") end
 ```
 
 ### opensak.read_csv
@@ -1533,6 +1588,8 @@ These fields cannot be written:
 - `trackable_count` — OpenSAK counts the trackables
 - `last_log_date` — OpenSAK takes it from the logs
 - `last_gpx_update` — it records when an import last touched the cache
+
+Each change is committed on its own. To keep several changes together, or undo them all on an error, run them inside `opensak.transaction(function() ... end)`, which is also faster for many changes. SQL `BEGIN`/`COMMIT` is refused.
 
 `opensak.sql_write()` may INSERT into and UPDATE these tables; an UPDATE may not set the columns listed. Whatever an INSERT puts into the columns OpenSAK maintains is recalculated right away.
 

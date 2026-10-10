@@ -521,7 +521,7 @@ function opensak.update(code, fields) end
 ---@return string # The cache code as stored (upper case).
 function opensak.insert(fields) end
 
----Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own, or not at all on an error. Needs the user's permission like opensak.update().
+---Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own (or with the surrounding opensak.transaction()), or not at all on an error. BEGIN, COMMIT and the like are refused; use opensak.transaction(). Needs the user's permission like opensak.update().
 ---
 ---Since API version 3.
 ---
@@ -535,6 +535,40 @@ function opensak.insert(fields) end
 ---@param params? table As for opensak.sql().
 ---@return integer # Number of rows inserted or updated.
 function opensak.sql_write(query, params) end
+
+---Run *fn* as one transaction: every change it makes to the active database (opensak.update, insert, sql_write, set_corrected, clear_corrected) is kept when *fn* returns, and all of it is undone if *fn* raises an error, which opensak.transaction() then raises again. Many changes in one transaction are also faster than the same changes committed one by one. Inside *fn*, opensak.cache, caches, sql and the like see the changes already made; everything else in OpenSAK, exports included, sees them only afterwards. A transaction inside another one is undone on its own on an error, and kept with the outer one otherwise. opensak.switch_database, move_caches and copy_caches cannot be used inside. Needs the user's permission like opensak.update(). A macro that ends inside a transaction (e.g. cancelled) keeps none of it.
+---
+---Since API version 3.
+---
+---```lua
+---local n = opensak.transaction(function()
+---    local n = 0
+---    for c in opensak.caches{ found = true, fields = {"code"} } do
+---        opensak.update(c.code, { user_flag = true })
+---        n = n + 1
+---    end
+---    return n
+---end)
+---print(n .. " caches flagged")
+----- error() inside the function undoes everything it changed:
+---local ok, err = pcall(opensak.transaction, function()
+---    opensak.update("GC12345", { user_flag = true })
+---    error("changed my mind")
+---end)
+---```
+---@param fn fun() The function to run.
+---@return any ... # What *fn* returns.
+function opensak.transaction(fn) end
+
+---Whether the macro is inside opensak.transaction().
+---
+---Since API version 3.
+---
+---```lua
+---if not opensak.in_transaction() then print("each change is committed on its own") end
+---```
+---@return boolean # true inside opensak.transaction().
+function opensak.in_transaction() end
 
 ---Read a CSV file (UTF-8) into an array of rows keyed by the header line. A relative path is resolved against the macro file's folder. If the file's folder has no read permission (Settings → Folder permissions), OpenSAK asks the user to allow it for this run or always. The file may be at most 10 MB.
 ---
