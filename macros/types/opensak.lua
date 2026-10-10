@@ -121,6 +121,52 @@
 ---@field last_log_date string? Date of the latest log, "YYYY-MM-DD".
 ---@field last_gpx_update string? When an import last touched the cache, "YYYY-MM-DDTHH:MM:SS"; finds caches the latest Pocket Query did not refresh.
 
+---The fields `opensak.update()` may change; `false` clears a field that is not a boolean.
+---@class opensak.CacheUpdate
+---@field name? string Cache name.
+---@field type? string Cache type, e.g. "Traditional Cache".
+---@field container? string|false Container size, e.g. "Small".
+---@field lat? number Posted latitude (decimal degrees).
+---@field lon? number Posted longitude (decimal degrees).
+---@field difficulty? number|false Difficulty 1–5.
+---@field terrain? number|false Terrain 1–5.
+---@field owner? string|false Owner name.
+---@field placed_by? string|false Placed-by name as shown on the listing.
+---@field hidden? string|false Hidden date, "YYYY-MM-DD".
+---@field found? boolean Found by you.
+---@field found_date? string|false Your find date, "YYYY-MM-DD".
+---@field dnf? boolean Your latest log is a Didn't find it.
+---@field dnf_date? string|false Date of your DNF, "YYYY-MM-DD".
+---@field ftf? boolean You were first to find.
+---@field available? boolean Not disabled.
+---@field archived? boolean Archived.
+---@field premium? boolean Premium-member only.
+---@field country? string|false Country.
+---@field state? string|false State / region.
+---@field county? string|false County.
+---@field elevation? number|false Elevation in metres.
+---@field favorite_points? integer|false Favourite points (nil until known).
+---@field find_count? integer|false Number of Found it logs by anyone.
+---@field user_flag? boolean User flag.
+---@field user_sort? integer|false User sort value.
+---@field user_data? table<integer, string|false> User data fields 1–4; "" when empty.
+---@field color? string|false Colour tag, e.g. "#FF5733".
+---@field locked? boolean Locked against import changes.
+---@field watch? boolean On the watchlist.
+---@field note? string|false Your local note.
+---@field gc_note? string|false Personal note from geocaching.com.
+---@field hint? string|false Hint text as imported.
+---@field url? string|false Listing URL.
+---@field corrected? {lat: number, lon: number}|string|false Corrected coordinates; nil if the cache is not solved.
+
+---A new cache for `opensak.insert{}`.
+---@class opensak.CacheInsert: opensak.CacheUpdate
+---@field code string Cache code, e.g. "GC12345".
+---@field name string Cache name.
+---@field type string Cache type, e.g. "Traditional Cache".
+---@field lat number Posted latitude (decimal degrees).
+---@field lon number Posted longitude (decimal degrees).
+
 ---The OpenSAK API, available as a global in every macro.
 opensak = {}
 
@@ -337,7 +383,7 @@ function opensak.tables(options) end
 ---```
 ---@param table string Table or view name.
 ---@param options? opensak.ReadOptions `database`: read another database instead of the active one.
----@return {name: string, type: string}[] # Column names and SQL types, in table order.
+---@return {name: string, type: string, required: boolean}[] # Column names and SQL types, in table order; `required`: NOT NULL without a default, so an INSERT must give it.
 function opensak.columns(table, options) end
 
 ---All databases in OpenSAK's database list, sorted by name.
@@ -447,6 +493,48 @@ function opensak.set_corrected(code, lat, lon) end
 ---@param code string GC code, e.g. "GC12345".
 ---@return boolean # false if the cache is not in the database.
 function opensak.clear_corrected(code) end
+
+---Change fields of a cache in the active database. The keys are cache field names (see Changing caches); only the given fields change. `false` clears a field that is not a boolean. Fields OpenSAK maintains itself, such as `code`, `distance` or `log_count`, cannot be written. Before the first change to a database, OpenSAK asks the user to allow it (see Changing caches).
+---
+---Since API version 2.
+---
+---```lua
+---opensak.update("GC12345", { user_flag = true, user_data = { [2] = "solved" } })
+---for c in opensak.caches{ found = true, fields = {"color"} } do
+---    if not c.color then opensak.update(c.code, { color = "#00AA00" }) end
+---end
+---```
+---@param code string GC code, e.g. "GC12345".
+---@param fields opensak.CacheUpdate The fields to change.
+---@return boolean # false if the cache is not in the database.
+function opensak.update(code, fields) end
+
+---Add a new cache to the active database. `code`, `name`, `type`, `lat` and `lon` are required; any other writable field may be given too (see Changing caches). Fails if the code is already in the database. Needs the user's permission like opensak.update().
+---
+---Since API version 2.
+---
+---```lua
+---opensak.insert{ code = "GC12345", name = "My bonus", type = "Unknown",
+---                lat = 47.36872, lon = 8.54093, user_flag = true }
+---```
+---@param fields opensak.CacheInsert The new cache's fields.
+---@return string # The cache code as stored (upper case).
+function opensak.insert(fields) end
+
+---Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own, or not at all on an error. Needs the user's permission like opensak.update().
+---
+---Since API version 2.
+---
+---```lua
+---local n = opensak.sql_write(
+---  "UPDATE caches SET user_data_1 = ? WHERE country = ? AND found = 0",
+---  { "todo", "Switzerland" })
+---print(n .. " caches marked")
+---```
+---@param query string One INSERT or UPDATE statement.
+---@param params? table As for opensak.sql().
+---@return integer # Number of rows inserted or updated.
+function opensak.sql_write(query, params) end
 
 ---Read a CSV file (UTF-8) into an array of rows keyed by the header line. A relative path is resolved against the macro file's folder. If the file's folder has no read permission (Settings → Folder permissions), OpenSAK asks the user to allow it for this run or always. The file may be at most 10 MB.
 ---

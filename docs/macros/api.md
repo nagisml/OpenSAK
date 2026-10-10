@@ -39,6 +39,9 @@ See [Example macros](#example-macros) for complete scripts and [Editor support](
 | [`opensak.copy_caches`](#opensakcopycaches) | 2 |
 | [`opensak.set_corrected`](#opensaksetcorrected) | 1 |
 | [`opensak.clear_corrected`](#opensakclearcorrected) | 1 |
+| [`opensak.update`](#opensakupdate) | 2 |
+| [`opensak.insert`](#opensakinsert) | 2 |
+| [`opensak.sql_write`](#opensaksqlwrite) | 2 |
 | [`opensak.read_csv`](#opensakreadcsv) | 1 |
 | [`opensak.export_file`](#opensakexportfile) | 2 |
 | [`opensak.export_gpx`](#opensakexportgpx) | 2 |
@@ -447,7 +450,7 @@ Parameters:
 - `table` (`string`) — Table or view name.
 - `options` (`opensak.ReadOptions`, optional) — `database`: read another database instead of the active one.
 
-Returns `{name: string, type: string}[]` — Column names and SQL types, in table order.
+Returns `{name: string, type: string, required: boolean}[]` — Column names and SQL types, in table order; `required`: NOT NULL without a default, so an INSERT must give it.
 
 Since API version 2.
 
@@ -656,6 +659,81 @@ Example:
 
 ```lua
 opensak.clear_corrected("GC12345")
+```
+
+### opensak.update
+
+```lua
+opensak.update(code, fields)
+```
+
+Change fields of a cache in the active database. The keys are cache field names (see Changing caches); only the given fields change. `false` clears a field that is not a boolean. Fields OpenSAK maintains itself, such as `code`, `distance` or `log_count`, cannot be written. Before the first change to a database, OpenSAK asks the user to allow it (see Changing caches).
+
+Parameters:
+
+- `code` (`string`) — GC code, e.g. "GC12345".
+- `fields` (`opensak.CacheUpdate`) — The fields to change.
+
+Returns `boolean` — false if the cache is not in the database.
+
+Since API version 2.
+
+Example:
+
+```lua
+opensak.update("GC12345", { user_flag = true, user_data = { [2] = "solved" } })
+for c in opensak.caches{ found = true, fields = {"color"} } do
+    if not c.color then opensak.update(c.code, { color = "#00AA00" }) end
+end
+```
+
+### opensak.insert
+
+```lua
+opensak.insert(fields)
+```
+
+Add a new cache to the active database. `code`, `name`, `type`, `lat` and `lon` are required; any other writable field may be given too (see Changing caches). Fails if the code is already in the database. Needs the user's permission like opensak.update().
+
+Parameters:
+
+- `fields` (`opensak.CacheInsert`) — The new cache's fields.
+
+Returns `string` — The cache code as stored (upper case).
+
+Since API version 2.
+
+Example:
+
+```lua
+opensak.insert{ code = "GC12345", name = "My bonus", type = "Unknown",
+                lat = 47.36872, lon = 8.54093, user_flag = true }
+```
+
+### opensak.sql_write
+
+```lua
+opensak.sql_write(query [, params])
+```
+
+Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own, or not at all on an error. Needs the user's permission like opensak.update().
+
+Parameters:
+
+- `query` (`string`) — One INSERT or UPDATE statement.
+- `params` (`table`, optional) — As for opensak.sql().
+
+Returns `integer` — Number of rows inserted or updated.
+
+Since API version 2.
+
+Example:
+
+```lua
+local n = opensak.sql_write(
+  "UPDATE caches SET user_data_1 = ? WHERE country = ? AND found = 0",
+  { "todo", "Switzerland" })
+print(n .. " caches marked")
 ```
 
 ### opensak.read_csv
@@ -1438,6 +1516,34 @@ Keys of the table returned by `opensak.cache()`, `opensak.current()` and `opensa
 | `trackable_count` | `integer` | Number of trackables in the cache. |
 | `last_log_date` | `string?` | Date of the latest log, "YYYY-MM-DD". |
 | `last_gpx_update` | `string?` | When an import last touched the cache, "YYYY-MM-DDTHH:MM:SS"; finds caches the latest Pocket Query did not refresh. |
+
+## Changing caches
+
+`opensak.update()`, `opensak.insert{}`, `opensak.sql_write()`, `opensak.set_corrected()` and `opensak.clear_corrected()` change the active database. Before a macro changes a database for the first time, OpenSAK asks whether macros may change it: **Deny** (the function fails, and OpenSAK does not ask again during this run), **Until OpenSAK closes**, or **Always**. Databases allowed always are listed in Settings → Folder permissions, where they can be removed again.
+
+Writable cache fields: `name`, `type`, `container`, `lat`, `lon`, `difficulty`, `terrain`, `owner`, `placed_by`, `hidden`, `found`, `found_date`, `dnf`, `dnf_date`, `ftf`, `available`, `archived`, `premium`, `country`, `state`, `county`, `elevation`, `favorite_points`, `find_count`, `user_flag`, `user_sort`, `user_data`, `color`, `locked`, `watch`, `note`, `gc_note`, `hint`, `url`, `corrected`. `false` clears a field that is not a boolean, and "" clears a text field. `user_data` takes the slots to change, e.g. `{ [2] = "solved" }`; `corrected` takes `{ lat = .., lon = .. }` or a coordinate string. Dates are `"YYYY-MM-DD"`. `opensak.insert{}` also needs `code`, and `name`, `type`, `lat`, `lon`.
+
+These fields cannot be written:
+
+- `code` — it identifies the cache
+- `distance` — OpenSAK calculates it from the coordinates and the centre point
+- `bearing` — OpenSAK calculates it from the coordinates and the centre point
+- `waypoint_count` — OpenSAK counts the waypoints
+- `log_count` — OpenSAK counts the logs
+- `trackable_count` — OpenSAK counts the trackables
+- `last_log_date` — OpenSAK takes it from the logs
+- `last_gpx_update` — it records when an import last touched the cache
+
+`opensak.sql_write()` may INSERT into and UPDATE these tables; an UPDATE may not set the columns listed. Whatever an INSERT puts into the columns OpenSAK maintains is recalculated right away.
+
+| Table | Protected columns |
+|---|---|
+| `attributes` | `cache_id`, `id` |
+| `caches` | `bearing`, `distance`, `found_log_count`, `gc_cache_id`, `gc_code`, `guid`, `id`, `imported_at`, `last_found_date`, `last_four_logs`, `last_gpx_update`, `last_log_date`, `location_basis`, `location_dataset`, `location_source`, `location_updated`, `log_count`, `source_file`, `trackable_count`, `waypoint_count` |
+| `logs` | `cache_id`, `id`, `log_id` |
+| `trackables` | `cache_id`, `id` |
+| `user_notes` | `cache_id`, `id` |
+| `waypoints` | `cache_id`, `id`, `parent_gc_code` |
 
 ## Example macros
 

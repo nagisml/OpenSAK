@@ -238,12 +238,13 @@ class MainWindow(QMainWindow):
         # Start time per refresh generation, for the timing log lines in
         # _on_refresh_result(). Popped when the result (or error) comes back.
         self._refresh_started_at: dict[int, float] = {}
-        # GC codes whose corrected coordinates a running Lua macro changed;
-        # refreshed in one go by end_macro() instead of once per call.
+        # GC codes whose data a running Lua macro changed; refreshed in one
+        # go by end_macro() instead of once per call.
         self._macro_changed_codes: set[GcCode] = set()
-        # A running macro moved caches out of the active database; the view
-        # is reloaded once by end_macro().
+        # A running macro moved caches out of the active database, or added
+        # caches to it; the view is reloaded once by end_macro().
         self._macro_caches_removed = False
+        self._macro_caches_added = False
         # Issue #558: the toolbar Where box's expression currently in
         # effect — only set once validated on Enter, so a half-typed
         # expression never leaks into refreshes triggered elsewhere.
@@ -3368,6 +3369,7 @@ class MainWindow(QMainWindow):
             # Pending refreshes belong to the previous database.
             self._macro_changed_codes.clear()
             self._macro_caches_removed = False
+            self._macro_caches_added = False
             self._on_database_switched(db)
         self._clear_filter()
 
@@ -3403,6 +3405,20 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.StandardButton.Yes
 
+    def caches_changed(self, codes, added: bool) -> None:
+        """MacroHost: a macro changed (or, with *added*, inserted) caches;
+        refreshed once in end_macro() like set_corrected_coords()."""
+        self._macro_changed_codes.update(codes)
+        if added:
+            self._macro_caches_added = True
+
+    def approve_database_write(self, name: str, path):
+        """MacroHost: ask whether macros may change the database *name*
+        (OpenSAK's own dialog, on top of the macro dialog)."""
+        from opensak.gui.dialogs.macro_dialog import ask_database_write_approval
+        parent = getattr(self, "_macro_dialog", None) or self
+        return ask_database_write_approval(parent, name, path)
+
     def approve_folder(self, target, folder, write: bool):
         """MacroHost: ask whether the macro may use *folder* (OpenSAK's own
         dialog, on top of the macro dialog)."""
@@ -3418,19 +3434,23 @@ class MainWindow(QMainWindow):
         return choose_file_for_macro(parent, title, file_filter, save, start_dir)
 
     def end_macro(self) -> None:
-        """MacroHost: refresh what the macro's corrected-coordinate changes
-        affect. A handful of caches get the same per-cache refresh as the
-        other entry points; beyond that, one full reload of table and map is
-        cheaper than updating each row (refresh_cache_row() scans the whole
-        model and _load_full_cache() loads logs etc. per call)."""
+        """MacroHost: refresh what the macro's cache changes affect. A
+        handful of caches get the same per-cache refresh as the other entry
+        points; beyond that, or when caches were added (new rows are not in
+        the table model yet), one full reload of table and map is cheaper
+        than updating each row (refresh_cache_row() scans the whole model
+        and _load_full_cache() loads logs etc. per call)."""
         changed, self._macro_changed_codes = self._macro_changed_codes, set()
+        added, self._macro_caches_added = self._macro_caches_added, False
         if self._macro_caches_removed:
             self._macro_caches_removed = False
             self._on_caches_moved()
             return
-        if len(changed) <= _MACRO_ROW_REFRESH_LIMIT:
+        if not added and len(changed) <= _MACRO_ROW_REFRESH_LIMIT:
             for gc_code in sorted(changed):
                 self._on_corrected_coords_changed(gc_code)
+            if changed:
+                self._update_info_bar()
             return
         self._refresh_cache_list()
         current = getattr(self._detail_panel, "_current_gc_code", None)
