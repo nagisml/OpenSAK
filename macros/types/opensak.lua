@@ -1,6 +1,6 @@
 ---@meta
 -- Generated from src/opensak/macro/runtime.py by scripts/generate_macro_api_docs.py — do not edit by hand.
--- OpenSAK Lua macro API, version 2. Reference: docs/macros/api.md
+-- OpenSAK Lua macro API, version 3. Reference: docs/macros/api.md
 
 ---Keys understood by `opensak.filter{}`, combined with AND (or OR with `mode`).
 ---@class opensak.FilterSpec
@@ -496,7 +496,7 @@ function opensak.clear_corrected(code) end
 
 ---Change fields of a cache in the active database. The keys are cache field names (see Changing caches); only the given fields change. `false` clears a field that is not a boolean. Fields OpenSAK maintains itself, such as `code`, `distance` or `log_count`, cannot be written. Before the first change to a database, OpenSAK asks the user to allow it (see Changing caches).
 ---
----Since API version 2.
+---Since API version 3.
 ---
 ---```lua
 ---opensak.update("GC12345", { user_flag = true, user_data = { [2] = "solved" } })
@@ -511,7 +511,7 @@ function opensak.update(code, fields) end
 
 ---Add a new cache to the active database. `code`, `name`, `type`, `lat` and `lon` are required; any other writable field may be given too (see Changing caches). Fails if the code is already in the database. Needs the user's permission like opensak.update().
 ---
----Since API version 2.
+---Since API version 3.
 ---
 ---```lua
 ---opensak.insert{ code = "GC12345", name = "My bonus", type = "Unknown",
@@ -523,7 +523,7 @@ function opensak.insert(fields) end
 
 ---Run one INSERT or UPDATE statement (SQLite) against the active database. Only the cache tables can be changed (`attributes`, `caches`, `logs`, `trackables`, `user_notes`, `waypoints`); nothing can be deleted, and an UPDATE may not set the keys or the columns OpenSAK maintains itself (see Changing caches). OpenSAK recalculates distances, counts and log dates of the caches the statement touched. An INSERT must give every column opensak.columns() marks as `required`; opensak.insert{} is simpler for new caches. Each statement is committed on its own, or not at all on an error. Needs the user's permission like opensak.update().
 ---
----Since API version 2.
+---Since API version 3.
 ---
 ---```lua
 ---local n = opensak.sql_write(

@@ -1940,7 +1940,7 @@ class MacroRuntime:
 
 # Raised whenever functions are added or changed in a released build, so
 # macros can check opensak.api_version() before using newer functions.
-API_VERSION = 2
+API_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -2373,7 +2373,7 @@ API: tuple[ApiFunction, ...] = (
         example='opensak.update("GC12345", { user_flag = true, user_data = { [2] = "solved" } })\n'
                 'for c in opensak.caches{ found = true, fields = {"color"} } do\n'
                 '    if not c.color then opensak.update(c.code, { color = "#00AA00" }) end\nend',
-        since=2,
+        since=3,
         bind=lambda rt, lua: rt._update,
         params=(_CODE, Param("fields", "opensak.CacheUpdate", "The fields to change.")),
         returns=("boolean", "false if the cache is not in the database."),
@@ -2387,7 +2387,7 @@ API: tuple[ApiFunction, ...] = (
                     "permission like opensak.update().",
         example='opensak.insert{ code = "GC12345", name = "My bonus", type = "Unknown",\n'
                 '                lat = 47.36872, lon = 8.54093, user_flag = true }',
-        since=2,
+        since=3,
         bind=lambda rt, lua: rt._insert,
         params=(Param("fields", "opensak.CacheInsert", "The new cache's fields."),),
         returns=("string", "The cache code as stored (upper case)."),
@@ -2409,7 +2409,7 @@ API: tuple[ApiFunction, ...] = (
                 '  "UPDATE caches SET user_data_1 = ? WHERE country = ? AND found = 0",\n'
                 '  { "todo", "Switzerland" })\n'
                 'print(n .. " caches marked")',
-        since=2,
+        since=3,
         bind=lambda rt, lua: rt._sql_write,
         params=(
             Param("query", "string", "One INSERT or UPDATE statement."),

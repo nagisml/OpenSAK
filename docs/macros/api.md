@@ -2,7 +2,7 @@
 
 # OpenSAK Lua macro API
 
-API version: **2** (`opensak.api_version()`).
+API version: **3** (`opensak.api_version()`).
 
 Macros are Lua 5.4 scripts run in a sandbox. They talk to OpenSAK through the global `opensak` table. File access is limited to the folders listed in Settings → Folder permissions. When a macro needs a file in another folder, OpenSAK asks the user whether to allow that folder for this run only or always, or to deny it; reading and writing are asked separately. OpenSAK's own settings and database files are never accessible.
 
@@ -39,9 +39,9 @@ See [Example macros](#example-macros) for complete scripts and [Editor support](
 | [`opensak.copy_caches`](#opensakcopycaches) | 2 |
 | [`opensak.set_corrected`](#opensaksetcorrected) | 1 |
 | [`opensak.clear_corrected`](#opensakclearcorrected) | 1 |
-| [`opensak.update`](#opensakupdate) | 2 |
-| [`opensak.insert`](#opensakinsert) | 2 |
-| [`opensak.sql_write`](#opensaksqlwrite) | 2 |
+| [`opensak.update`](#opensakupdate) | 3 |
+| [`opensak.insert`](#opensakinsert) | 3 |
+| [`opensak.sql_write`](#opensaksqlwrite) | 3 |
 | [`opensak.read_csv`](#opensakreadcsv) | 1 |
 | [`opensak.export_file`](#opensakexportfile) | 2 |
 | [`opensak.export_gpx`](#opensakexportgpx) | 2 |
@@ -676,7 +676,7 @@ Parameters:
 
 Returns `boolean` — false if the cache is not in the database.
 
-Since API version 2.
+Since API version 3.
 
 Example:
 
@@ -701,7 +701,7 @@ Parameters:
 
 Returns `string` — The cache code as stored (upper case).
 
-Since API version 2.
+Since API version 3.
 
 Example:
 
@@ -725,7 +725,7 @@ Parameters:
 
 Returns `integer` — Number of rows inserted or updated.
 
-Since API version 2.
+Since API version 3.
 
 Example:
 
