@@ -137,9 +137,14 @@ from opensak.macro.permissions import (
     macros_dir,
     protected_reason,
     resolve_path,
+    safe_write,
     temp_dir,
     with_grant,
+    write_denied_reason,
 )
+from opensak.stats import charts, tables as stats_tables
+from opensak.stats import html as report_html
+from opensak.stats import maps as report_maps
 from opensak.macro.sql import (
     MAX_ROWS,
     QUERY_TIMEOUT_S,
@@ -187,6 +192,40 @@ EXPORT_KEYS = frozenset({
 EXPORT_IF_EXISTS = ("overwrite", "skip", "ask")
 # Formats a Garmin device reads from its GPX / GGZ folder.
 DEVICE_FORMATS = ("gpx", "ggz")
+# opensak.write_text(): the file types it may write, and the largest file.
+WRITE_TEXT_SUFFIXES = (".txt", ".csv", ".tsv", ".html", ".htm", ".svg", ".md", ".json")
+MAX_WRITE_BYTES = 20 * 1024 * 1024
+# opensak.chart.bar() / chart.line(): the keys of the option table.
+CHART_KEYS = {
+    "bar": frozenset({"x", "y", "title", "width", "height", "color", "horizontal", "labels",
+                      "names"}),
+    "line": frozenset({"x", "y", "title", "width", "height", "color", "area", "labels"}),
+    "heatmap": frozenset({"title", "width", "color", "labels", "row_title", "col_title"}),
+    "rose": frozenset({"x", "y", "title", "width", "color", "labels"}),
+}
+# opensak.chart.map() / chart.points(): the keys of the option table.
+MAP_KEYS = {
+    "map": frozenset({"key", "value", "layer", "within", "title", "width", "height", "color",
+                      "extent", "legend"}),
+    "points": frozenset({"lat", "lon", "label", "layer", "within", "title", "width", "height",
+                         "color", "radius"}),
+}
+# opensak.stats.* / opensak.html.*: the keys of their option tables
+# (Lua name → Python keyword).
+STATS_OPTIONS = {
+    "group": {"period": "period", "count_distinct": "count_distinct", "sum": "sum",
+              "sort": "sort", "top": "top", "other": "other"},
+    "fill": {"key": "key", "period": "period", "from": "start", "to": "end"},
+    "pivot": {"rows": "rows_order", "cols": "cols_order", "sum": "sum"},
+    "every": {"first": "first", "last": "last", "date": "date_field"},
+    "table": {"columns": "columns", "link": "link", "caption": "caption", "bars": "bars",
+              "color": "color"},
+    "matrix": {"shade": "shade", "percent": "percent", "totals": "totals",
+               "row_title": "row_title", "col_title": "col_title", "color": "color"},
+    "regions": {"within": "within"},
+    "page": {"title": "title", "subtitle": "subtitle", "css": "css", "lang": "lang",
+             "footer": "footer", "body": "body"},
+}
 # opensak.exit(code): highest accepted exit code (portable process exit codes)
 MAX_EXIT_CODE = 255
 
@@ -1207,6 +1246,9 @@ class MacroRuntime:
         self._slept = 0.0
         self._polygons: dict[Path, LineShape] = {}
         self._boundaries: Optional[tuple[Any, Any]] = None  # (store, resolver)
+        # opensak.chart.map / points / geo.regions: the boundary data, False
+        # once it was found missing in this run.
+        self._map_data: Any = None
         # Opened by the first opensak.sql*() call of a run, closed after it.
         self._sql_db: Optional[ReadOnlyDatabase] = None
         # Databases other than the active one, read with the `database`
@@ -1364,9 +1406,14 @@ class MacroRuntime:
         fields = CACHE_FIELDS
         if "fields" in spec:
             fields = _cache_fields(spec.pop("fields"))
+        every = spec.pop("all", False)
+        if not isinstance(every, bool):
+            raise MacroError(f"opensak.caches: all must be true or false, got {every!r}")
         db = self._other_database("opensak.caches", spec.pop("database", None))
         session_factory = self._session_factory(db, "opensak.caches")
-        if spec or db is not None:
+        if every and spec:
+            raise MacroError("opensak.caches: all = true cannot be combined with filter keys")
+        if spec or db is not None or every:
             # Another database has no active filter: no keys = all its caches.
             filterset = build_filterset(spec, self._filter_polygon)[0] if spec else None
             with session_factory() as session:
@@ -1568,6 +1615,402 @@ class MacroRuntime:
             raise MacroError("opensak.read_csv: separator must be a string")
         rows = read_csv_rows(self._readable_file(path), sep)
         return lua.table_from([lua.table_from(r) for r in rows])
+
+    def _write_text(self, path=None, text=None, options=None) -> str:
+        func = "opensak.write_text"
+        if not isinstance(path, str) or not path.strip():
+            raise MacroError(f"{func} expects a file path")
+        if isinstance(text, (int, float)) and not isinstance(text, bool):
+            text = macro_forms.format_number(text)
+        if not isinstance(text, (str, bytes)):
+            raise MacroError(f"{func}: text must be a string, got {_lua_kind(text) or repr(text)}")
+        opts = {} if options is None else _from_lua(options)
+        if not isinstance(opts, dict) or set(opts) - {"append"}:
+            raise MacroError(f"{func}: options must be a table, e.g. {{ append = true }}")
+        append = opts.get("append", False)
+        if not isinstance(append, bool):
+            raise MacroError(f"{func}: append must be true or false, got {append!r}")
+        data = text.encode("utf-8") if isinstance(text, str) else text
+        file = Path(path.strip()).expanduser()
+        if not file.is_absolute():
+            file = (self._base_dir or macros_dir()) / file
+        # Refused before the user is asked to approve the folder.
+        try:
+            reason = write_denied_reason(resolve_path(file), WRITE_TEXT_SUFFIXES)
+        except (OSError, RuntimeError) as exc:
+            raise MacroError(f"cannot resolve {file}: {exc}") from None
+        if reason is not None:
+            raise MacroError(f"{func}: macros may not write {file} — {reason}")
+        target = self._check_access(file, write=True)
+        permissions = self._run_permissions
+        if (target, True) in self._picked:
+            permissions = with_grant(permissions, target.parent, True)
+        try:
+            if append and target.is_file():
+                data = target.read_bytes() + data
+            if len(data) > MAX_WRITE_BYTES:
+                raise MacroError(
+                    f"{func}: the file would be larger than "
+                    f"{MAX_WRITE_BYTES // (1024 * 1024)} MB"
+                )
+            return str(safe_write(target, data, permissions=permissions,
+                                  allowed_suffixes=WRITE_TEXT_SUFFIXES))
+        except FolderAccessDenied as exc:
+            raise MacroError(str(exc)) from None
+        except OSError as exc:
+            raise MacroError(f"cannot write {target}: {exc}") from None
+
+    def _chart(self, kind: str, rows=None, options=None) -> str:
+        func = f"opensak.chart.{kind}"
+        rows = _from_lua(rows)
+        matrix_input = isinstance(rows, dict) and "cells" in rows
+        if kind == "heatmap":
+            if not isinstance(rows, dict):
+                raise MacroError(f"{func} expects a matrix, e.g. from opensak.stats.pivot()")
+        elif rows == {}:
+            rows = []    # an empty Lua table
+        if kind != "heatmap" and not isinstance(rows, list) \
+                and not (kind == "bar" and matrix_input):
+            raise MacroError(
+                f"{func} expects a list of rows, e.g. {func}({{ {{ key = 2024, count = 12 }} }})"
+            )
+        opts = {} if options is None else _from_lua(options)
+        if not isinstance(opts, dict):
+            raise MacroError(f'{func}: options must be a table, e.g. {{ title = "Finds" }}')
+        unknown = set(opts) - CHART_KEYS[kind]
+        if unknown:
+            raise MacroError(
+                f"{func}: unknown option(s) {sorted(map(str, unknown))}; "
+                f"valid: {', '.join(sorted(CHART_KEYS[kind]))}"
+            )
+        for key in ("x", "title", "color", "row_title", "col_title"):
+            if key in opts and not isinstance(opts[key], str):
+                raise MacroError(f"{func}: {key} must be a string, got {opts[key]!r}")
+        if "y" in opts and not isinstance(opts["y"], str) \
+                and not (kind == "bar" and isinstance(opts["y"], list)):
+            raise MacroError(f"{func}: y must be a field name"
+                             + (" or a list of them" if kind == "bar" else "")
+                             + f", got {opts['y']!r}")
+        for key in ("horizontal", "area", "labels"):
+            if key in opts and not isinstance(opts[key], bool):
+                raise MacroError(f"{func}: {key} must be true or false, got {opts[key]!r}")
+        try:
+            if kind == "bar" and matrix_input:
+                # A matrix from stats.pivot: one stacked bar per row.
+                if "x" in opts or "y" in opts:
+                    raise MacroError(f"{func}: x and y are taken from the matrix")
+                rows, fields, names = charts.matrix_rows(rows)
+                opts = {"names": names, **opts, "y": fields}
+            if kind == "bar":
+                return charts.bar(rows, **opts)
+            if kind == "rose":
+                return charts.rose(rows, **opts)
+            if kind == "line":
+                return charts.line(rows, **opts)
+            return charts.heatmap(rows, **opts)
+        except charts.ChartError as exc:
+            raise MacroError(f"{func}: {exc}") from None
+
+    # ── opensak.stats.* / opensak.html.* ─────────────────────────────────
+    # The rows are Lua tables; only the fields a function needs are read,
+    # which keeps a list of 20 000 finds fast.
+
+    @staticmethod
+    def _row_list(func: str, rows: Any) -> list:
+        """The Lua rows 1..n, each checked to be a table."""
+        if not _is_lua_table(rows):
+            raise MacroError(f"{func} expects a list of rows (tables)")
+        result = [rows[i] for i in range(1, len(rows) + 1)]
+        if result:
+            # All rows are of one Python class (a Lua table) unless one is not.
+            table_class = type(result[0])
+            if not _is_lua_table(result[0]) or any(type(r) is not table_class for r in result):
+                for i, row in enumerate(result, 1):
+                    if not _is_lua_table(row):
+                        raise MacroError(f"{func}: row {i} is not a table")
+        return result
+
+    @staticmethod
+    def _fields(rows: list, names: Any) -> list[dict[str, Any]]:
+        """{name: value} of the given fields of each Lua row."""
+        names = [n for n in dict.fromkeys(names) if n is not None]
+        plain = (str, int, float, bool, type(None))
+        result = []
+        for row in rows:
+            values = {}
+            for n in names:
+                v = row[n]
+                values[n] = v if type(v) in plain else _from_lua(v)
+            result.append(values)
+        return result
+
+    @staticmethod
+    def _field_name(func: str, name: Any, what: str = "field") -> str:
+        if not isinstance(name, str) or not name:
+            raise MacroError(f"{func}: {what} must be a field name, got {name!r}")
+        return name
+
+    @staticmethod
+    def _stats_options(func: str, kind: str, options: Any) -> dict[str, Any]:
+        opts = {} if options is None else _from_lua(options)
+        if opts == []:
+            opts = {}
+        if not isinstance(opts, dict):
+            raise MacroError(f"{func}: options must be a table")
+        names = STATS_OPTIONS[kind]
+        unknown = set(opts) - set(names)
+        if unknown:
+            raise MacroError(
+                f"{func}: unknown option(s) {sorted(map(str, unknown))}; "
+                f"valid: {', '.join(sorted(names))}"
+            )
+        # 10.0 from Lua arithmetic counts as the whole number 10.
+        return {
+            names[k]: int(v) if isinstance(v, float) and v.is_integer() else v
+            for k, v in opts.items()
+        }
+
+    @staticmethod
+    def _stats_call(func: str, fn: Callable, *args, **kwargs) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except (stats_tables.StatsError, report_html.HtmlError) as exc:
+            text = str(exc)
+            raise MacroError(text if text.startswith("opensak.") else f"{func}: {text}") from None
+        except TypeError as exc:
+            raise MacroError(f"{func}: {exc}") from None
+
+    def _stats_group(self, lua, rows=None, by=None, options=None):
+        func = "opensak.stats.group"
+        rows = self._row_list(func, rows)
+        by = self._field_name(func, by, "by")
+        opts = self._stats_options(func, "group", options)
+        for key in ("count_distinct", "sum"):
+            if key in opts:
+                self._field_name(func, opts[key], key)
+        data = self._fields(rows, (by, opts.get("count_distinct"), opts.get("sum")))
+        return lua.table_from(self._stats_call(func, stats_tables.group, data, by, **opts),
+                              recursive=True)
+
+    def _stats_fill(self, lua, rows=None, options=None):
+        func = "opensak.stats.fill"
+        data = [_from_lua(r) for r in self._row_list(func, rows)]
+        opts = self._stats_options(func, "fill", options)
+        return lua.table_from(self._stats_call(func, stats_tables.fill, data, **opts),
+                              recursive=True)
+
+    def _stats_running(self, lua, rows=None, field="count", into="total"):
+        func = "opensak.stats.running"
+        data = [_from_lua(r) for r in self._row_list(func, rows)]
+        field = self._field_name(func, field)
+        into = self._field_name(func, into, "into")
+        return lua.table_from(self._stats_call(func, stats_tables.running, data, field, into),
+                              recursive=True)
+
+    def _stats_pivot(self, lua, rows=None, row_field=None, col_field=None, options=None):
+        func = "opensak.stats.pivot"
+        rows = self._row_list(func, rows)
+        row_field = self._field_name(func, row_field, "row field")
+        col_field = self._field_name(func, col_field, "column field")
+        opts = self._stats_options(func, "pivot", options)
+        for key in ("rows_order", "cols_order"):
+            if key in opts and not isinstance(opts[key], list):
+                raise MacroError(f"{func}: {'rows' if key == 'rows_order' else 'cols'} "
+                                 "must be a list of values")
+        data = self._fields(rows, (row_field, col_field, opts.get("sum")))
+        return lua.table_from(
+            self._stats_call(func, stats_tables.pivot, data, row_field, col_field, **opts),
+            recursive=True,
+        )
+
+    def _stats_every(self, lua, rows=None, step=None, options=None):
+        func = "opensak.stats.every"
+        rows = self._row_list(func, rows)
+        if isinstance(step, float) and step.is_integer():
+            step = int(step)
+        opts = self._stats_options(func, "every", options)
+        date_field = opts.get("date_field")
+        if date_field is not None:
+            self._field_name(func, date_field, "date")
+        data = [{"_index": i, **({date_field: _from_lua(r[date_field])} if date_field else {})}
+                for i, r in enumerate(rows)]
+        picked = self._stats_call(func, stats_tables.every, data, step, **opts)
+        result = []
+        for p in picked:
+            copy = lua.table()
+            for k, v in rows[p["_index"]].items():
+                copy[k] = v
+            copy["n"] = p["n"]
+            if "days" in p:
+                copy["days"] = p["days"]
+            result.append(copy)
+        return lua.table_from(result)
+
+    def _stats_summary(self, lua, rows=None, field=None):
+        func = "opensak.stats.summary"
+        rows = self._row_list(func, rows)
+        field = self._field_name(func, field)
+        data = self._fields(rows, (field,))
+        return lua.table_from(self._stats_call(func, stats_tables.summary, data, field))
+
+    def _stats_sort(self, lua, rows=None, *fields):
+        func = "opensak.stats.sort"
+        rows = self._row_list(func, rows)
+        if not fields:
+            raise MacroError(f'{func} needs at least one field, e.g. {func}(rows, "found_date")')
+        names = [self._field_name(func, f).lstrip("-") for f in fields]
+        order = self._stats_call(func, stats_tables.sort_order, self._fields(rows, names), fields)
+        return lua.table_from([rows[i] for i in order])
+
+    def _maps(self) -> Any:
+        """The boundary data for maps, or None if it is not installed."""
+        if self._map_data is None:
+            from opensak.geo import BoundaryStore
+
+            store = BoundaryStore()
+            self._map_data = report_maps.MapData(store) if store.available() else False
+        return self._map_data or None
+
+    @staticmethod
+    def _no_map(title: Any) -> str:
+        text = "Map not available: the boundary data is not installed."
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="40" role="img" '
+                f'aria-label="{report_html.escape(title or text)}" style="max-width:100%">'
+                f'<text x="0" y="24" font-size="13" fill="currentColor">'
+                f'{report_html.escape(text)}</text></svg>')
+
+    def _map_options(self, func: str, kind: str, options: Any) -> dict[str, Any]:
+        opts = {} if options is None else _from_lua(options)
+        if opts == []:
+            opts = {}
+        if not isinstance(opts, dict):
+            raise MacroError(f'{func}: options must be a table, e.g. {{ layer = "state" }}')
+        unknown = set(opts) - MAP_KEYS[kind]
+        if unknown:
+            raise MacroError(
+                f"{func}: unknown option(s) {sorted(map(str, unknown))}; "
+                f"valid: {', '.join(sorted(MAP_KEYS[kind]))}"
+            )
+        for key in ("key", "value", "lat", "lon", "label", "layer", "title", "color", "extent"):
+            if key in opts and not isinstance(opts[key], str):
+                raise MacroError(f"{func}: {key} must be a string, got {opts[key]!r}")
+        if "legend" in opts and not isinstance(opts["legend"], bool):
+            raise MacroError(f"{func}: legend must be true or false, got {opts['legend']!r}")
+        return opts
+
+    def _chart_map(self, rows=None, options=None) -> str:
+        func = "opensak.chart.map"
+        rows = self._row_list(func, rows)
+        opts = self._map_options(func, "map", options)
+        data = self._maps()
+        if data is None:
+            return self._no_map(opts.get("title"))
+        fields = self._fields(rows, (opts.get("key", "key"), opts.get("value", "count")))
+        try:
+            return report_maps.choropleth(data, fields, **opts)
+        except charts.ChartError as exc:
+            raise MacroError(f"{func}: {exc}") from None
+
+    def _chart_points(self, rows=None, options=None) -> str:
+        func = "opensak.chart.points"
+        rows = self._row_list(func, rows)
+        opts = self._map_options(func, "points", options)
+        data = self._maps()
+        if data is None:
+            return self._no_map(opts.get("title"))
+        fields = self._fields(rows, (opts.get("lat", "lat"), opts.get("lon", "lon"),
+                                     opts.get("label")))
+        try:
+            return report_maps.points(data, fields, **opts)
+        except charts.ChartError as exc:
+            raise MacroError(f"{func}: {exc}") from None
+
+    def _geo_regions(self, lua, layer="country", options=None):
+        func = "opensak.geo.regions"
+        opts = self._stats_options(func, "regions", options)
+        data = self._maps()
+        if data is None:
+            return None
+        try:
+            return lua.table_from(report_maps.regions(data, layer, opts.get("within")),
+                                  recursive=True)
+        except charts.ChartError as exc:
+            raise MacroError(f"{func}: {exc}") from None
+
+    def _date_period(self, value=None, length=None) -> str:
+        return self._stats_call("opensak.date.period", stats_tables.period, value, length)
+
+    def _stats_streaks(self, lua, rows=None, field=None):
+        func = "opensak.stats.streaks"
+        rows = self._row_list(func, rows)
+        field = self._field_name(func, field)
+        result = self._stats_call(func, stats_tables.streaks, self._fields(rows, (field,)), field)
+        return lua.table_from(result, recursive=True)
+
+    def _html_matrix(self, matrix=None, options=None) -> str:
+        func = "opensak.html.matrix"
+        data = _from_lua(matrix)
+        if not isinstance(data, dict):
+            raise MacroError(f"{func} expects a matrix, e.g. from opensak.stats.pivot()")
+        opts = self._stats_options(func, "matrix", options)
+        return self._stats_call(func, report_html.matrix, data, **opts)
+
+    def _date_diff(self, a=None, b=None) -> int:
+        return self._stats_call("opensak.date.diff", stats_tables.days_between, a, b)
+
+    def _html_table(self, rows=None, options=None) -> str:
+        func = "opensak.html.table"
+        rows = self._row_list(func, rows)
+        opts = self._stats_options(func, "table", options)
+        columns, link = opts.get("columns"), opts.get("link")
+        if link is not None and not (isinstance(link, dict)
+                                     and all(isinstance(v, str) for v in link.values())):
+            raise MacroError(f'{func}: link must be a table, e.g. {{ code = "url" }}')
+        if columns is None:
+            data = [_from_lua(r) for r in rows]
+        else:
+            names = [c if isinstance(c, str) else (c[0] if isinstance(c, list) and c else None)
+                     for c in (columns if isinstance(columns, list) else [])]
+            data = self._fields(rows, [*names, *(link or {}).values()])
+        if "bars" in opts and not isinstance(opts["bars"], list):
+            raise MacroError(f'{func}: bars must be a list of field names, e.g. {{ "count" }}')
+        return self._stats_call(func, report_html.table, data, **opts)
+
+    @staticmethod
+    def _html_escape(value=None) -> str:
+        if _is_lua_table(value) or _is_lua_function(value):
+            raise MacroError("opensak.html.escape expects a string, number, boolean or nil")
+        return report_html.escape(value)
+
+    def _html_tiles(self, items=None) -> str:
+        func = "opensak.html.tiles"
+        data = _from_lua(items)
+        return self._stats_call(func, report_html.tiles, [] if data == {} else data)
+
+    def _html_columns(self, *parts) -> str:
+        func = "opensak.html.columns"
+        if len(parts) == 1 and _is_lua_table(parts[0]):
+            parts = tuple(_from_lua(parts[0]) or [])
+        return self._stats_call(func, report_html.columns, list(parts))
+
+    def _html_page(self, spec=None) -> str:
+        func = "opensak.html.page"
+        if not _is_lua_table(spec):
+            raise MacroError(f'{func} expects a table, e.g. {func}{{ title = "Report", body }}')
+        # The array part of the table is the body: html.page{ title = "x", part1, part2 }.
+        parts = [spec[i] for i in range(1, len(spec) + 1)]
+        named = {k: v for k, v in spec.items() if not isinstance(k, int) or isinstance(k, bool)}
+        unknown = set(named) - set(STATS_OPTIONS["page"])
+        if unknown:
+            raise MacroError(
+                f"{func}: unknown key(s) {sorted(map(str, unknown))}; "
+                f"valid: {', '.join(sorted(STATS_OPTIONS['page']))}"
+            )
+        opts: dict[str, Any] = {str(k): _from_lua(v) for k, v in named.items()}
+        body = opts.pop("body", None)
+        if body is not None:
+            parts.extend(body if isinstance(body, list) else [body])
+        return self._stats_call(func, report_html.page, parts, **opts)
 
     def _choose_file(self, title=None, file_filter=None, mode=None) -> Optional[str]:
         for name, value in (("title", title), ("filter", file_filter)):
@@ -2416,6 +2859,9 @@ class MacroRuntime:
             if self._boundaries is not None:
                 self._boundaries[0].close()
                 self._boundaries = None
+            if self._map_data:
+                self._map_data.close()
+            self._map_data = None
             self._close_sql()
             self._close_other_databases()
             self._load_macro = None
@@ -2817,7 +3263,9 @@ API: tuple[ApiFunction, ...] = (
                     "caches of the active filter, in grid order. With filter "
                     "keys (see Filter keys): the caches matching them, sorted "
                     "by name; the view and the active filter stay "
-                    "unchanged. `database` reads another database, without "
+                    "unchanged. `all = true`: every cache of the database, "
+                    "sorted by name, whatever the active filter shows. "
+                    "`database` reads another database, without "
                     "switching: its caches matching the filter keys, or all "
                     "of them, sorted by name. `fields` limits the fields "
                     "loaded (`code` is always included), which makes loops "
@@ -2831,6 +3279,7 @@ API: tuple[ApiFunction, ...] = (
                 'for c in opensak.caches{ database = "Found", fields = {"corrected"} } do\n'
                 "    print(c.code, c.corrected and c.corrected.lat)\nend",
         since=2,
+        changed=((3, "added `all`"),),
         bind=lambda rt, lua: lambda *a: rt._caches(lua, *a),
         params=(Param("spec", "opensak.CachesSpec",
                       "Filter keys, `database` and/or `fields`; nothing = the "
@@ -3075,6 +3524,31 @@ API: tuple[ApiFunction, ...] = (
                   optional=True),
         ),
         returns=("table<string, string>[]", "One table per data row, keyed by header."),
+    ),
+    ApiFunction(
+        name="write_text",
+        description="Write *text* to a file as UTF-8 and return the file "
+                    "written. A relative path is resolved against the macro "
+                    "file's folder. The folder needs write permission (the "
+                    "OpenSAK temp folder, opensak.temp_dir(), has it by "
+                    "default); for an unapproved one the user is asked first. "
+                    "Only these file types can be written: "
+                    + " ".join(WRITE_TEXT_SUFFIXES) + ". An existing file is "
+                    "replaced, or extended with `append = true`. At most "
+                    f"{MAX_WRITE_BYTES // (1024 * 1024)} MB.",
+        example='local path = opensak.write_text(opensak.temp_dir() .. "/report.html",\n'
+                '  "<h1>" .. opensak.count() .. " caches</h1>")\n'
+                'print("written: " .. path)',
+        since=3,
+        bind=lambda rt, lua: rt._write_text,
+        params=(
+            Param("path", "string", "The file to write."),
+            Param("text", "string", "The content."),
+            Param("options", "{append?: boolean}",
+                  "`append`: add *text* at the end of an existing file.",
+                  optional=True),
+        ),
+        returns=("string", "The file written (full path)."),
     ),
     ApiFunction(
         name="export_file",
@@ -3677,6 +4151,462 @@ API: tuple[ApiFunction, ...] = (
 
     # -- opensak.date ---------------------------------------------------------
     ApiFunction(
+        name="chart.bar",
+        description="A bar chart of *rows* as an SVG string, for an HTML "
+                    "page (opensak.write_text) or a .svg file. Each row is a "
+                    "table; `x` names its category field (default \"key\") "
+                    "and `y` its value field (default \"count\"), nil "
+                    "counts as 0. `horizontal = true` draws the bars from "
+                    "the left, for long category names. Text and grid lines "
+                    "take the colour of the surrounding page; the bars use "
+                    "the CSS variable --chart-color, else `color`. Each bar "
+                    "shows its value as tooltip; `labels` also writes it on "
+                    f"the bar (default: up to {charts.MAX_VALUE_LABELS} bars). "
+                    "With a list of fields as `y`, the bars are stacked, one "
+                    "segment per field, with a legend (`names` instead of the "
+                    f"field names; at most {len(charts.SERIES_COLORS)}); a "
+                    "matrix from opensak.stats.pivot gives one stacked bar per "
+                    "matrix row, e.g. finds per year and cache type. "
+                    f"At most {charts.MAX_POINTS} rows.",
+        example="local rows = opensak.sql([[SELECT strftime('%Y', found_date) AS year,\n"
+                "  COUNT(*) AS finds FROM caches WHERE found GROUP BY year ORDER BY year]])\n"
+                'local svg = opensak.chart.bar(rows, { x = "year", y = "finds", title = "Finds per year" })\n'
+                'opensak.write_text(opensak.temp_dir() .. "/finds.svg", svg)\n'
+                '-- stacked: finds per year and type\n'
+                'local by_type = opensak.stats.pivot(finds, "year", "type")\n'
+                'local svg2 = opensak.chart.bar(by_type, { title = "Finds per year and type" })',
+        since=3,
+        bind=lambda rt, lua: functools.partial(rt._chart, "bar"),
+        params=(
+            Param("rows", "table[]|opensak.Matrix",
+                  "The rows, e.g. the result of opensak.sql(), or a matrix."),
+            Param("options", "{x?: string, y?: string|string[], title?: string, width?: number, "
+                  "height?: number, color?: string, horizontal?: boolean, labels?: boolean, "
+                  "names?: string[]}",
+                  "Fields to draw, title, size in pixels (default 640 × 280), "
+                  "colour (name or \"#rrggbb\").", optional=True),
+        ),
+        returns=("string", "The chart as SVG."),
+    ),
+    ApiFunction(
+        name="chart.line",
+        description="A line chart of *rows* in their order as an SVG string, "
+                    "like opensak.chart.bar: `x` the label on the x axis "
+                    "(evenly spaced, e.g. months), `y` the value. `area = "
+                    "true` fills below the line. The value of the last point "
+                    "is written next to it unless `labels = false`. Each "
+                    "point shows its value as tooltip.",
+        example="local rows, total = {}, 0\n"
+                "for _, r in ipairs(opensak.sql([[SELECT strftime('%Y-%m', found_date) AS month,\n"
+                "    COUNT(*) AS n FROM caches WHERE found GROUP BY month ORDER BY month]])) do\n"
+                "  total = total + r.n\n"
+                "  rows[#rows + 1] = { key = r.month, count = total }\n"
+                "end\n"
+                'local svg = opensak.chart.line(rows, { title = "Total finds", area = true })',
+        since=3,
+        bind=lambda rt, lua: functools.partial(rt._chart, "line"),
+        params=(
+            Param("rows", "table[]", "The rows, in the order to draw."),
+            Param("options", "{x?: string, y?: string, title?: string, width?: number, "
+                  "height?: number, color?: string, area?: boolean, labels?: boolean}",
+                  "As for opensak.chart.bar, plus `area`.", optional=True),
+        ),
+        returns=("string", "The chart as SVG."),
+    ),
+    ApiFunction(
+        name="chart.heatmap",
+        description="A grid chart of a matrix (see opensak.stats.pivot) as an "
+                    "SVG string: one cell per row × column value, the darker "
+                    "the larger, e.g. finds per difficulty × terrain. "
+                    "`labels = false` leaves the numbers out of the cells; "
+                    "`row_title` and `col_title` name the two fields.",
+        example='local dt = opensak.stats.pivot(finds, "difficulty", "terrain",\n'
+                '  { rows = {1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5}, cols = {1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5} })\n'
+                'local svg = opensak.chart.heatmap(dt, { row_title = "D", col_title = "T" })',
+        since=3,
+        bind=lambda rt, lua: functools.partial(rt._chart, "heatmap"),
+        params=(
+            Param("matrix", "opensak.Matrix", "The result of opensak.stats.pivot()."),
+            Param("options", "{title?: string, width?: number, color?: string, "
+                  "labels?: boolean, row_title?: string, col_title?: string}",
+                  "As for opensak.chart.bar, plus the field titles.", optional=True),
+        ),
+        returns=("string", "The chart as SVG."),
+    ),
+    ApiFunction(
+        name="chart.rose",
+        description="A rose (polar area) chart of *rows* as an SVG string: one "
+                    "sector per row, in row order clockwise from the top, e.g. "
+                    "finds per compass direction (N, NE, E, …). The area of a "
+                    "sector grows with its value; `x` names the label field, "
+                    "`y` the value (as for opensak.chart.bar).",
+        example='local DIRS = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" }\n'
+                'for _, c in ipairs(finds) do\n'
+                '  c.dir = DIRS[math.floor((opensak.coords.bearing(HOME_LAT, HOME_LON, c.lat, c.lon) + 22.5) / 45) % 8 + 1]\n'
+                'end\n'
+                'local rows = {}\n'
+                'for _, g in ipairs(opensak.stats.group(finds, "dir")) do rows[g.key] = g.count end\n'
+                'local sectors = {}\n'
+                'for i, d in ipairs(DIRS) do sectors[i] = { key = d, count = rows[d] or 0 } end\n'
+                'local svg = opensak.chart.rose(sectors, { title = "Finds by direction" })',
+        since=3,
+        bind=lambda rt, lua: functools.partial(rt._chart, "rose"),
+        params=(
+            Param("rows", "table[]", "One row per sector, clockwise from north."),
+            Param("options", "{x?: string, y?: string, title?: string, width?: number, "
+                  "color?: string, labels?: boolean}",
+                  "As for opensak.chart.bar; `width` is also the height.", optional=True),
+        ),
+        returns=("string", "The chart as SVG."),
+    ),
+    ApiFunction(
+        name="chart.map",
+        description="A map of countries, states or counties as an SVG string, "
+                    "each region coloured by a value — e.g. finds per country "
+                    "from opensak.stats.group. `key` names the field with the "
+                    "region name (default \"key\"), `value` the number "
+                    "(default \"count\"), `layer` the kind of region: "
+                    "\"country\" (default), \"state\" or \"county\". `within` "
+                    "(a country name or a list) limits a state or county map "
+                    "to those countries; without it the countries the regions "
+                    "are in are shown. `extent = \"all\"` shows every region of "
+                    "the layer instead of zooming to the ones with a value. "
+                    "Names are matched ignoring case, accents and punctuation; "
+                    "those that match no region are listed below the map. The "
+                    "outlines are those of Update location (offline, no "
+                    "internet needed; county outlines are downloaded per "
+                    "country on first use, like there). Without the boundary "
+                    "data the map is a short note instead.",
+        example='local countries = opensak.stats.group(finds, "country")\n'
+                'local map = opensak.chart.map(countries, { title = "Finds per country" })\n'
+                'local cantons = opensak.stats.group(finds, "state")\n'
+                'local map2 = opensak.chart.map(cantons, { layer = "state", within = "Switzerland" })',
+        since=3,
+        bind=lambda rt, lua: rt._chart_map,
+        params=(
+            Param("rows", "table[]", "One row per region with its value."),
+            Param("options", "{key?: string, value?: string, layer?: string, "
+                  "within?: string|string[], title?: string, width?: number, "
+                  "height?: number, color?: string, extent?: string, legend?: boolean}",
+                  "See above. The height follows the shape of the area unless given.",
+                  optional=True),
+        ),
+        returns=("string", "The map as SVG."),
+    ),
+    ApiFunction(
+        name="chart.points",
+        description="A dot map as an SVG string: one dot per row at its "
+                    "coordinates (fields `lat` and `lon`), over the outlines of "
+                    "`layer` (\"country\", \"state\" or \"county\"), zoomed to "
+                    "the dots or to the `within` countries. `label` names the "
+                    f"field shown as tooltip. At most {report_maps.MAX_MAP_POINTS} "
+                    "rows; dots on the same pixel are drawn once.",
+        example='local svg = opensak.chart.points(finds, { label = "name", title = "My finds" })',
+        since=3,
+        bind=lambda rt, lua: rt._chart_points,
+        params=(
+            Param("rows", "table[]", "The rows, e.g. caches from opensak.caches()."),
+            Param("options", "{lat?: string, lon?: string, label?: string, layer?: string, "
+                  "within?: string|string[], title?: string, width?: number, "
+                  "height?: number, color?: string, radius?: number}",
+                  "See above; `radius` of the dots in pixels (default 2.5).", optional=True),
+        ),
+        returns=("string", "The map as SVG."),
+    ),
+    ApiFunction(
+        name="geo.regions",
+        description="The regions of a layer (\"country\", \"state\" or "
+                    "\"county\") in the boundary data used by Update location "
+                    "and opensak.chart.map, one row per name: `{name =}`, for "
+                    "states and counties also `country`. `within` limits them "
+                    "to one country or a list. With it a macro can say "
+                    "\"18 of 26 cantons\". nil if the boundary data is not "
+                    "installed.",
+        example='local cantons = opensak.geo.regions("state", { within = "Switzerland" })\n'
+                'if cantons then print(#cantons .. " cantons") end',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._geo_regions(lua, *a),
+        params=(
+            Param("layer", "string", '"country" (default), "state" or "county".', optional=True),
+            Param("options", "{within?: string|string[]}", "See above.", optional=True),
+        ),
+        returns=("{name: string, country?: string}[]?", "The regions, sorted."),
+    ),
+    ApiFunction(
+        name="stats.group",
+        description="Count *rows* per value of the field *by* and return one "
+                    "row per group: `{key =, count =}`, sorted by key. Rows "
+                    "can come from opensak.caches(), opensak.sql() or "
+                    "opensak.read_csv(); rows whose *by* is nil are left "
+                    "out. Options: `period` groups a date field (\"YYYY-MM-DD\" "
+                    "or os.time() seconds) by \"day\", \"week\" (\"2026-W41\"), "
+                    "\"month\" (\"2026-10\"), \"year\" or \"weekday\" "
+                    "(\"Mon\"…\"Sun\", sorted Monday first). `count_distinct "
+                    "= field` adds `distinct`, the number of different values "
+                    "of that field per group; `sum = field` adds `sum`. `sort "
+                    "= \"count\"` (or \"sum\") puts the largest group first. "
+                    "`top = n` keeps n groups and puts the rest into one "
+                    "group named `other` (default \"Other\").",
+        example='local finds = {}\n'
+                'for c in opensak.caches{ found = true, fields = {"found_date", "type"} } do\n'
+                '  finds[#finds + 1] = c\n'
+                'end\n'
+                'for _, g in ipairs(opensak.stats.group(finds, "found_date",\n'
+                '    { period = "year", count_distinct = "found_date" })) do\n'
+                '  print(g.key, g.count .. " finds", g.distinct .. " cache days")\n'
+                'end\n'
+                'local types = opensak.stats.group(finds, "type", { sort = "count", top = 8 })',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_group(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows."),
+            Param("by", "string", "The field to group by."),
+            Param("options", "{period?: string, count_distinct?: string, sum?: string, "
+                  "sort?: string, top?: integer, other?: string}",
+                  "See above.", optional=True),
+        ),
+        returns=("{key: any, count: integer, distinct?: integer, sum?: number}[]",
+                 "One row per group."),
+    ),
+    ApiFunction(
+        name="stats.fill",
+        description="*rows* sorted by the period in field `key` (default "
+                    "\"key\"), with a row added for each missing \"day\", "
+                    "\"month\" (default) or \"year\" between the first and "
+                    "the last row, or between `from` and `to`. Number fields "
+                    "of an added row are 0. Use it before a line chart, so "
+                    "months without finds still take their place on the x "
+                    "axis.",
+        example='local months = opensak.stats.fill(\n'
+                '  opensak.stats.group(finds, "found_date", { period = "month" }))',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_fill(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows, e.g. from opensak.stats.group."),
+            Param("options", "{key?: string, period?: string, from?: string, to?: string}",
+                  'Field with the period, its length, first and last period '
+                  '(e.g. "2020-01").', optional=True),
+        ),
+        returns=("table[]", "New rows."),
+    ),
+    ApiFunction(
+        name="stats.running",
+        description="Copies of *rows* with the running total of *field* "
+                    "(default \"count\") in *into* (default \"total\"), e.g. "
+                    "the total number of finds at the end of each month.",
+        example='local total = opensak.stats.running(months)   -- months[i].total\n'
+                'local svg = opensak.chart.line(total, { y = "total", area = true })',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_running(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows, in order."),
+            Param("field", "string", "The number field to add up.", optional=True),
+            Param("into", "string", "The field for the total.", optional=True),
+        ),
+        returns=("table[]", "New rows."),
+    ),
+    ApiFunction(
+        name="stats.pivot",
+        description="Count *rows* per pair of values of two fields, e.g. "
+                    "difficulty × terrain. Returns `{rows =, cols =, cells "
+                    "=, max =, total =}`: `rows` and `cols` are the values "
+                    "of the two fields (sorted), `cells[i][j]` the count for "
+                    "rows[i] and cols[j]. The options `rows` and `cols` give "
+                    "the values and their order instead (other values are "
+                    "left out); `sum = field` adds up that field instead of "
+                    "counting. For opensak.chart.heatmap.",
+        example='local dt = opensak.stats.pivot(finds, "difficulty", "terrain")\n'
+                'print("D/T combinations: " .. dt.total)',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_pivot(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows."),
+            Param("row_field", "string", "Field for the rows of the matrix."),
+            Param("col_field", "string", "Field for the columns."),
+            Param("options", "{rows?: any[], cols?: any[], sum?: string}",
+                  "See above.", optional=True),
+        ),
+        returns=("opensak.Matrix", "The matrix."),
+    ),
+    ApiFunction(
+        name="stats.every",
+        description="Every *step*-th row of *rows*, e.g. every 1000th find "
+                    "(sort the rows first, see opensak.stats.sort): copies "
+                    "with the row number in `n`. The first and the last row "
+                    "are included unless `first = false` / `last = false`. "
+                    "With `date = field`, `days` holds the days since the "
+                    "previous row picked.",
+        example='local milestones = opensak.stats.every(finds, 1000, { date = "found_date" })\n'
+                'for _, m in ipairs(milestones) do print(m.n, m.found_date, m.code, m.days) end',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_every(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows, in order."),
+            Param("step", "integer", "Pick every step-th row."),
+            Param("options", "{first?: boolean, last?: boolean, date?: string}",
+                  "See above.", optional=True),
+        ),
+        returns=("table[]", "Copies of the picked rows."),
+    ),
+    ApiFunction(
+        name="stats.summary",
+        description="Key figures of *field* over *rows* (nil values left "
+                    "out): `count`, `distinct`, `min` and `max` (also for "
+                    "dates and text), and for numbers `sum`, `mean` and "
+                    "`median`.",
+        example='local f = opensak.stats.summary(finds, "found_date")\n'
+                'print(f.count .. " finds on " .. f.distinct .. " days, first " .. f.min)\n'
+                'print("mean difficulty", opensak.stats.summary(finds, "difficulty").mean)',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_summary(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows."),
+            Param("field", "string", "The field."),
+        ),
+        returns=("{count: integer, distinct: integer, min?: any, max?: any, sum?: number, "
+                 "mean?: number, median?: number}", "The figures."),
+    ),
+    ApiFunction(
+        name="stats.sort",
+        description="A new list of *rows* sorted by the fields in turn; "
+                    "\"-field\" sorts largest first. nil values come last. "
+                    "Faster than table.sort with a compare function, and "
+                    "stable: rows with equal fields keep their order.",
+        example='finds = opensak.stats.sort(finds, "found_date", "code")\n'
+                'local best = opensak.stats.sort(caches, "-favorite_points", "name")',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_sort(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows."),
+            Param("...", "string", "The fields to sort by."),
+        ),
+        returns=("table[]", "The same rows in the new order."),
+    ),
+    ApiFunction(
+        name="stats.streaks",
+        description="Runs of days in a date field: `days` (the number of "
+                    "different days), `longest` (most days in a row with at "
+                    "least one row, e.g. your longest caching streak), `gap` "
+                    "(most days in a row without, between the first and the "
+                    "last day) and `last` (the run that ends on the last day). "
+                    "Each run is `{days =, first =, last =}`; `gap` is nil if "
+                    "there is none.",
+        example='local s = opensak.stats.streaks(finds, "found_date")\n'
+                'print("longest streak: " .. s.longest.days .. " days, from " .. s.longest.first)',
+        since=3,
+        bind=lambda rt, lua: lambda *a: rt._stats_streaks(lua, *a),
+        params=(
+            Param("rows", "table[]", "The rows."),
+            Param("field", "string", "The date field."),
+        ),
+        returns=("{days: integer, longest?: opensak.Run, gap?: opensak.Run, last?: opensak.Run}",
+                 "The runs."),
+    ),
+    ApiFunction(
+        name="html.escape",
+        description="*value* as text for HTML: `& < > \" '` are escaped, nil "
+                    "becomes \"\", 3.0 becomes \"3\".",
+        example='local cell = "<td>" .. opensak.html.escape(c.name) .. "</td>"',
+        since=3,
+        bind=lambda rt, lua: rt._html_escape,
+        params=(Param("value", "any", "A string, number, boolean or nil."),),
+        returns=("string", "Escaped text."),
+    ),
+    ApiFunction(
+        name="html.table",
+        description="*rows* as an HTML table (values escaped). `columns` "
+                    "lists the fields to show, each a field name or "
+                    "`{field, heading}`; without it all fields are shown, "
+                    "sorted by name. Number columns are right-aligned. `link "
+                    "= { code = \"url\" }` turns the code cells into links to "
+                    "the row's url field (http/https only). `bars = "
+                    "{\"count\"}` adds a bar next to each value of those "
+                    "number fields, scaled to the largest (in `color`, "
+                    "\"#rrggbb\"). The bars use inline styles only, so the "
+                    "table can also be copied into a geocaching.com profile.",
+        example='local html = opensak.html.table(milestones, { columns = {\n'
+                '  {"n", "Find"}, {"found_date", "Date"}, {"code", "Code"}, {"name", "Name"} },\n'
+                '  link = { code = "url" } })',
+        since=3,
+        bind=lambda rt, lua: rt._html_table,
+        params=(
+            Param("rows", "table[]", "The rows."),
+            Param("options", "{columns?: (string|string[])[], link?: table<string, string>, "
+                  "caption?: string, bars?: string[], color?: string}", "See above.",
+                  optional=True),
+        ),
+        returns=("string", "HTML."),
+    ),
+    ApiFunction(
+        name="html.matrix",
+        description="A matrix (from opensak.stats.pivot) as an HTML table: "
+                    "the values of the two fields as headings, each cell "
+                    "shaded by its value. `percent = true` shows each cell as "
+                    "a share of all, `totals = true` adds a total row and "
+                    "column, `shade = false` leaves the colours out; "
+                    "`row_title` and `col_title` name the fields, `color` "
+                    "(\"#rrggbb\") the shading. Inline styles only, so it also "
+                    "works in a geocaching.com profile.",
+        example='local dt = opensak.stats.pivot(finds, "difficulty", "terrain")\n'
+                'local html = opensak.html.matrix(dt, { row_title = "D", col_title = "T", totals = true })',
+        since=3,
+        bind=lambda rt, lua: rt._html_matrix,
+        params=(
+            Param("matrix", "opensak.Matrix", "The matrix."),
+            Param("options", "{shade?: boolean, percent?: boolean, totals?: boolean, "
+                  "row_title?: string, col_title?: string, color?: string}",
+                  "See above.", optional=True),
+        ),
+        returns=("string", "HTML."),
+    ),
+    ApiFunction(
+        name="html.tiles",
+        description="Key figures as a row of tiles: a list of `{label =, "
+                    "value =}`.",
+        example='local html = opensak.html.tiles{\n'
+                '  { label = "finds", value = f.count },\n'
+                '  { label = "cache days", value = f.distinct },\n'
+                '}',
+        since=3,
+        bind=lambda rt, lua: rt._html_tiles,
+        params=(Param("items", "{label: string, value: any}[]", "The tiles."),),
+        returns=("string", "HTML."),
+    ),
+    ApiFunction(
+        name="html.columns",
+        description="Put HTML parts (e.g. two charts) side by side; on a "
+                    "narrow window they go one below the other.",
+        example='local html = opensak.html.columns(chart1, chart2)',
+        since=3,
+        bind=lambda rt, lua: rt._html_columns,
+        params=(Param("...", "string", "The HTML parts (or one list of them)."),),
+        returns=("string", "HTML."),
+    ),
+    ApiFunction(
+        name="html.page",
+        description="A complete HTML page for opensak.write_text: `title` "
+                    "(also the heading), `subtitle`, the body — the strings "
+                    "in the list part of the table, and/or `body` — and "
+                    "`footer`. A built-in stylesheet with a light and a dark "
+                    "theme styles headings (`<h2>`), tables, tiles, columns "
+                    "and charts; `css` is added after it. The body is put "
+                    "in as it is: build it from the html.* and chart.* "
+                    "functions, or escape your own text with html.escape.",
+        example='local page = opensak.html.page{\n'
+                '  title = "Find statistics", subtitle = opensak.database(),\n'
+                '  opensak.html.tiles{ { label = "finds", value = #finds } },\n'
+                '  "<h2>Finds per year</h2>",\n'
+                '  opensak.chart.bar(opensak.stats.group(finds, "found_date", { period = "year" })),\n'
+                '}\n'
+                'opensak.write_text(opensak.temp_dir() .. "/stats.html", page)',
+        since=3,
+        bind=lambda rt, lua: rt._html_page,
+        params=(Param("spec", "{title?: string, subtitle?: string, css?: string, "
+                      "lang?: string, footer?: string, body?: string|string[], "
+                      "[integer]: string}", "See above."),),
+        returns=("string", "The page."),
+    ),
+    ApiFunction(
         name="date.parse",
         description="Parse a date into seconds since the epoch, the same kind "
                     "of value as `os.time()`. Without a format, ISO 8601 "
@@ -3708,6 +4638,42 @@ API: tuple[ApiFunction, ...] = (
     ),
 
     # -- opensak.settings -----------------------------------------------------
+    ApiFunction(
+        name="date.diff",
+        description="Whole days from date *a* to date *b* (negative if *b* "
+                    "is earlier). Dates are \"YYYY-MM-DD\" strings (a time "
+                    "after it is ignored) or seconds since the epoch.",
+        example='print(opensak.date.diff("2026-01-01", "2026-10-06"))   -- 278',
+        since=3,
+        bind=lambda rt, lua: rt._date_diff,
+        params=(
+            Param("a", "string|number", "The first date."),
+            Param("b", "string|number", "The second date."),
+        ),
+        returns=("integer", "Days."),
+    ),
+    ApiFunction(
+        name="date.period",
+        description="The period a date falls in, named as opensak.stats.group "
+                    "names it: \"day\" (\"2026-10-06\"), \"week\" "
+                    "(\"2026-W41\"), \"month\" (\"2026-10\"), \"year\" "
+                    "(\"2026\") or \"weekday\" (\"Tue\"). For a field of your "
+                    "own to group or pivot by, e.g. the year × month table of "
+                    "your finds.",
+        example='for _, c in ipairs(finds) do\n'
+                '  c.year = opensak.date.period(c.found_date, "year")\n'
+                '  c.month = c.found_date:sub(6, 7)\n'
+                'end\n'
+                'local grid = opensak.stats.pivot(finds, "year", "month")',
+        since=3,
+        bind=lambda rt, lua: rt._date_period,
+        params=(
+            Param("date", "string|number", '"YYYY-MM-DD" (a time after it is ignored) '
+                  "or seconds since the epoch."),
+            Param("period", "string", '"day", "week", "month", "year" or "weekday".'),
+        ),
+        returns=("string", "The period."),
+    ),
     ApiFunction(
         name="settings.load",
         description="The settings this macro saved with opensak.settings.save(), "

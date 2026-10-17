@@ -279,6 +279,63 @@ def protected_reason(target: Path) -> Optional[str]:
     return None
 
 
+# ── Writes: allowed file types, never an autostart location ─────────────────
+
+# Shell start-up files in the home folder: a line added there runs at the
+# next login or terminal.
+_SHELL_RC_FILES = (
+    ".bashrc", ".bash_profile", ".bash_login", ".profile",
+    ".zshrc", ".zprofile", ".zshenv", ".zlogin",
+)
+
+
+def _autostart_locations() -> tuple[list[Path], list[Path]]:
+    """(folders, files) where a written file runs at the next login."""
+    home = Path.home()
+    folders = [home / ".config" / "autostart", home / "Library" / "LaunchAgents"]
+    for var in ("APPDATA", "PROGRAMDATA"):
+        base = os.environ.get(var)
+        if base:
+            folders.append(
+                Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+            )
+    files = [home / name for name in _SHELL_RC_FILES]
+    resolved: tuple[list[Path], list[Path]] = ([], [])
+    for source, target in ((folders, resolved[0]), (files, resolved[1])):
+        for path in source:
+            try:
+                target.append(resolve_path(path))
+            except (OSError, RuntimeError):
+                pass
+    return resolved
+
+
+def _folded(path: Path) -> PurePath:
+    # Windows and macOS file names are case-insensitive by default.
+    return PurePath(str(path).casefold())
+
+
+def write_denied_reason(
+    target: Path, allowed_suffixes: Optional[Iterable[str]] = None
+) -> Optional[str]:
+    """Why a macro may not write the resolved *target*, beyond
+    protected_reason(), or None: an autostart location, or (with
+    *allowed_suffixes*, e.g. {".html", ".txt"}) a file type the writing
+    function does not produce."""
+    folded = _folded(target)
+    folders, files = _autostart_locations()
+    if any(folded == _folded(f) for f in files) or any(
+        folded.is_relative_to(_folded(f)) for f in folders
+    ):
+        return "it is an autostart location"
+    if allowed_suffixes is not None:
+        allowed = sorted({s.lower() for s in allowed_suffixes})
+        # A ":" would name an NTFS alternate data stream ("a.html:x.bat").
+        if ":" in target.name or target.suffix.lower() not in allowed:
+            return f"only these file types can be written: {' '.join(allowed)}"
+    return None
+
+
 def protected_inside(folder: str | Path) -> list[Path]:
     """OpenSAK's own data in *folder* or below it: the data and database
     folders, opensak.json, bootstrap.json, the token and every listed
@@ -333,11 +390,14 @@ def check_access(
     path: str | Path,
     write: bool = False,
     permissions: Optional[Iterable[FolderPermission]] = None,
+    allowed_suffixes: Optional[Iterable[str]] = None,
 ) -> Path:
     """Return the resolved *path* if a permitted folder grants the access.
 
     Raises FolderAccessDenied otherwise. *permissions* defaults to the
-    saved list (load_permissions()).
+    saved list (load_permissions()). A write is also refused for an
+    autostart location, and for a suffix not in *allowed_suffixes* (see
+    write_denied_reason()).
     """
     if permissions is None:
         permissions = load_permissions()
@@ -347,6 +407,8 @@ def check_access(
         raise FolderAccessDenied(f"cannot resolve {path}: {exc}") from None
     kind = "write" if write else "read"
     reason = protected_reason(target)
+    if reason is None and write:
+        reason = write_denied_reason(target, allowed_suffixes)
     if reason is not None:
         raise FolderAccessDenied(f"macros may not {kind} {target} — {reason}")
     entry = _matching_entry(target, permissions)
@@ -424,11 +486,13 @@ def safe_write(
     data: bytes | str,
     permissions: Optional[Iterable[FolderPermission]] = None,
     encoding: str = "utf-8",
+    allowed_suffixes: Optional[Iterable[str]] = None,
 ) -> Path:
     """Write *data* to *path* for a macro and return the resolved path.
 
     The only way macro API functions may write files:
-      * check_access(write=True), so the deny list and folder list apply;
+      * check_access(write=True), so the deny list and folder list apply
+        (and *allowed_suffixes*, the file types the caller produces);
       * a target with more than one hard link is refused;
       * the data goes to a temporary file in the same folder, which then
         replaces the target with os.replace(). The rename swaps the folder
@@ -443,7 +507,11 @@ def safe_write(
     """
     if permissions is not None:
         permissions = list(permissions)    # iterated twice
-    target = check_access(path, write=True, permissions=permissions)
+    if allowed_suffixes is not None:
+        allowed_suffixes = tuple(allowed_suffixes)
+    target = check_access(
+        path, write=True, permissions=permissions, allowed_suffixes=allowed_suffixes
+    )
     _refuse_hard_link(target)
     payload = data.encode(encoding) if isinstance(data, str) else data
 
@@ -454,7 +522,10 @@ def safe_write(
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
-        final = check_access(path, write=True, permissions=permissions)
+        final = check_access(
+            path, write=True, permissions=permissions,
+            allowed_suffixes=allowed_suffixes,
+        )
         if final != target:
             raise FolderAccessDenied(
                 f"macros may not write {path} — the path changed while writing "

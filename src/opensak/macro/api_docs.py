@@ -481,8 +481,9 @@ def render_lua_stub() -> str:
 
     lines += [
         "",
-        "---Filter keys plus `fields` and `database`, understood by `opensak.caches{}`.",
+        "---Filter keys plus `fields`, `all` and `database`, understood by `opensak.caches{}`.",
         "---@class opensak.CachesSpec: opensak.FilterSpec",
+        "---@field all? boolean Every cache of the database, whatever the active filter shows.",
         "---@field fields? string[] Cache fields to load (`code` is always included).",
         "---@field database? string Read this database instead of the active one.",
         "",
@@ -494,6 +495,20 @@ def render_lua_stub() -> str:
         "---@class opensak.TransferOptions",
         "---@field codes? string[] GC codes to transfer (default: the caches of the active filter).",
         '---@field if_exists? "newer"|"replace"|"skip" When the cache exists in the target (default "newer").',
+        "",
+        "---A matrix from `opensak.stats.pivot()`, for `opensak.chart.heatmap()`.",
+        "---@class opensak.Matrix",
+        "---@field rows any[] Values of the row field.",
+        "---@field cols any[] Values of the column field.",
+        "---@field cells number[][] `cells[i][j]`: the count for rows[i] and cols[j].",
+        "---@field max number The largest cell.",
+        "---@field total number Sum of all cells.",
+        "",
+        "---A run of days from `opensak.stats.streaks()`.",
+        "---@class opensak.Run",
+        "---@field days integer Number of days.",
+        '---@field first string First day, "YYYY-MM-DD".',
+        '---@field last string Last day, "YYYY-MM-DD".',
         "",
         "---What `opensak.export_gpx{}` writes.",
         "---@class opensak.ExportSpec",
@@ -539,6 +554,8 @@ def render_lua_stub() -> str:
     ]
     for field in CACHE_FIELDS:
         lines.append(f"---@field {field.name} {field.type} {field.description}")
+    # Macros may add fields of their own, e.g. to group by with opensak.stats.
+    lines.append("---@field [string] any")
 
     lines += [
         "",

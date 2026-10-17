@@ -232,8 +232,45 @@
 			</Overload>
 		</KeyWord>
 		<KeyWord name="opensak.caches" func="yes">
-			<Overload retVal="fun(): opensak.Cache?" descr="Iterate over caches, one table per cache (see Cache fields), in a generic `for`.&#x0a;Without arguments: the caches of the active filter, in grid order. With filter&#x0a;keys (see Filter keys): the caches matching them, sorted by name; the view and&#x0a;the active filter stay unchanged. `database` reads another database, without&#x0a;switching: its caches matching the filter keys, or all of them, sorted by name.&#x0a;`fields` limits the fields loaded (`code` is always included), which makes loops&#x0a;over many caches faster. Caches are loaded in chunks, so large databases do not&#x0a;hit the memory limit.&#x0a;Returns fun(): opensak.Cache? — Iterator for a generic `for`.">
+			<Overload retVal="fun(): opensak.Cache?" descr="Iterate over caches, one table per cache (see Cache fields), in a generic `for`.&#x0a;Without arguments: the caches of the active filter, in grid order. With filter&#x0a;keys (see Filter keys): the caches matching them, sorted by name; the view and&#x0a;the active filter stay unchanged. `all = true`: every cache of the database,&#x0a;sorted by name, whatever the active filter shows. `database` reads another&#x0a;database, without switching: its caches matching the filter keys, or all of&#x0a;them, sorted by name. `fields` limits the fields loaded (`code` is always&#x0a;included), which makes loops over many caches faster. Caches are loaded in&#x0a;chunks, so large databases do not hit the memory limit.&#x0a;Returns fun(): opensak.Cache? — Iterator for a generic `for`.">
 				<Param name="[spec: opensak.CachesSpec]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.chart" />
+		<KeyWord name="opensak.chart.bar" func="yes">
+			<Overload retVal="string" descr="A bar chart of *rows* as an SVG string, for an HTML page (opensak.write_text) or&#x0a;a .svg file. Each row is a table; `x` names its category field (default &quot;key&quot;)&#x0a;and `y` its value field (default &quot;count&quot;), nil counts as 0. `horizontal = true`&#x0a;draws the bars from the left, for long category names. Text and grid lines take&#x0a;the colour of the surrounding page; the bars use the CSS variable --chart-color,&#x0a;else `color`. Each bar shows its value as tooltip; `labels` also writes it on&#x0a;the bar (default: up to 16 bars). With a list of fields as `y`, the bars are&#x0a;stacked, one segment per field, with a legend (`names` instead of the field&#x0a;names; at most 8); a matrix from opensak.stats.pivot gives one stacked bar per&#x0a;matrix row, e.g. finds per year and cache type. At most 5000 rows.&#x0a;Returns string — The chart as SVG.">
+				<Param name="rows: table[]|opensak.Matrix" />
+				<Param name="[options: {x?: string, y?: string|string[], title?: string, width?: number, height?: number, color?: string, horizontal?: boolean, labels?: boolean, names?: string[]}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.chart.heatmap" func="yes">
+			<Overload retVal="string" descr="A grid chart of a matrix (see opensak.stats.pivot) as an SVG string: one cell&#x0a;per row × column value, the darker the larger, e.g. finds per difficulty ×&#x0a;terrain. `labels = false` leaves the numbers out of the cells; `row_title` and&#x0a;`col_title` name the two fields.&#x0a;Returns string — The chart as SVG.">
+				<Param name="matrix: opensak.Matrix" />
+				<Param name="[options: {title?: string, width?: number, color?: string, labels?: boolean, row_title?: string, col_title?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.chart.line" func="yes">
+			<Overload retVal="string" descr="A line chart of *rows* in their order as an SVG string, like opensak.chart.bar:&#x0a;`x` the label on the x axis (evenly spaced, e.g. months), `y` the value. `area =&#x0a;true` fills below the line. The value of the last point is written next to it&#x0a;unless `labels = false`. Each point shows its value as tooltip.&#x0a;Returns string — The chart as SVG.">
+				<Param name="rows: table[]" />
+				<Param name="[options: {x?: string, y?: string, title?: string, width?: number, height?: number, color?: string, area?: boolean, labels?: boolean}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.chart.map" func="yes">
+			<Overload retVal="string" descr="A map of countries, states or counties as an SVG string, each region coloured by&#x0a;a value — e.g. finds per country from opensak.stats.group. `key` names the field&#x0a;with the region name (default &quot;key&quot;), `value` the number (default &quot;count&quot;),&#x0a;`layer` the kind of region: &quot;country&quot; (default), &quot;state&quot; or &quot;county&quot;. `within`&#x0a;(a country name or a list) limits a state or county map to those countries;&#x0a;without it the countries the regions are in are shown. `extent = &quot;all&quot;` shows&#x0a;every region of the layer instead of zooming to the ones with a value. Names are&#x0a;matched ignoring case, accents and punctuation; those that match no region are&#x0a;listed below the map. The outlines are those of Update location (offline, no&#x0a;internet needed; county outlines are downloaded per country on first use, like&#x0a;there). Without the boundary data the map is a short note instead.&#x0a;Returns string — The map as SVG.">
+				<Param name="rows: table[]" />
+				<Param name="[options: {key?: string, value?: string, layer?: string, within?: string|string[], title?: string, width?: number, height?: number, color?: string, extent?: string, legend?: boolean}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.chart.points" func="yes">
+			<Overload retVal="string" descr="A dot map as an SVG string: one dot per row at its coordinates (fields `lat` and&#x0a;`lon`), over the outlines of `layer` (&quot;country&quot;, &quot;state&quot; or &quot;county&quot;), zoomed to&#x0a;the dots or to the `within` countries. `label` names the field shown as tooltip.&#x0a;At most 50000 rows; dots on the same pixel are drawn once.&#x0a;Returns string — The map as SVG.">
+				<Param name="rows: table[]" />
+				<Param name="[options: {lat?: string, lon?: string, label?: string, layer?: string, within?: string|string[], title?: string, width?: number, height?: number, color?: string, radius?: number}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.chart.rose" func="yes">
+			<Overload retVal="string" descr="A rose (polar area) chart of *rows* as an SVG string: one sector per row, in row&#x0a;order clockwise from the top, e.g. finds per compass direction (N, NE, E, …).&#x0a;The area of a sector grows with its value; `x` names the label field, `y` the&#x0a;value (as for opensak.chart.bar).&#x0a;Returns string — The chart as SVG.">
+				<Param name="rows: table[]" />
+				<Param name="[options: {x?: string, y?: string, title?: string, width?: number, color?: string, labels?: boolean}]" />
 			</Overload>
 		</KeyWord>
 		<KeyWord name="opensak.choose" func="yes">
@@ -400,6 +437,12 @@
 			</Overload>
 		</KeyWord>
 		<KeyWord name="opensak.date" />
+		<KeyWord name="opensak.date.diff" func="yes">
+			<Overload retVal="integer" descr="Whole days from date *a* to date *b* (negative if *b* is earlier). Dates are&#x0a;&quot;YYYY-MM-DD&quot; strings (a time after it is ignored) or seconds since the epoch.&#x0a;Returns integer — Days.">
+				<Param name="a: string|number" />
+				<Param name="b: string|number" />
+			</Overload>
+		</KeyWord>
 		<KeyWord name="opensak.date.format" func="yes">
 			<Overload retVal="string" descr="Format seconds since the epoch (e.g. from `os.time()` or `opensak.date.parse()`)&#x0a;in local time.&#x0a;Returns string — The formatted date.">
 				<Param name="t: number" />
@@ -410,6 +453,12 @@
 			<Overload retVal="integer?" descr="Parse a date into seconds since the epoch, the same kind of value as&#x0a;`os.time()`. Without a format, ISO 8601 (`&quot;2026-10-06&quot;`,&#x0a;`&quot;2026-10-06T14:30:00Z&quot;`) and `&quot;06.10.2026 [14:30[:00]]&quot;` are understood. Times&#x0a;without a zone are local time.&#x0a;Returns integer? — Seconds since the epoch, or nil if the text does not parse.">
 				<Param name="text: string" />
 				<Param name="[fmt: string]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.date.period" func="yes">
+			<Overload retVal="string" descr="The period a date falls in, named as opensak.stats.group names it: &quot;day&quot;&#x0a;(&quot;2026-10-06&quot;), &quot;week&quot; (&quot;2026-W41&quot;), &quot;month&quot; (&quot;2026-10&quot;), &quot;year&quot; (&quot;2026&quot;) or&#x0a;&quot;weekday&quot; (&quot;Tue&quot;). For a field of your own to group or pivot by, e.g. the year ×&#x0a;month table of your finds.&#x0a;Returns string — The period.">
+				<Param name="date: string|number" />
+				<Param name="period: string" />
 			</Overload>
 		</KeyWord>
 		<KeyWord name="opensak.description" func="yes">
@@ -457,6 +506,46 @@
 		<KeyWord name="opensak.form" func="yes">
 			<Overload retVal="table&lt;string, any&gt;?, string?" descr="Show a dialog built from a table (see Forms) and wait until it is closed. Fields&#x0a;with a value come back in a table keyed by their `id`. Callbacks such as&#x0a;`on_change` run while the form stays open and can change it through the handle&#x0a;they get. Without `buttons` the form has OK and Cancel. Tools → Form designer in&#x0a;the macro window builds forms visually and imports GSAK forms.&#x0a;Returns table&lt;string, any&gt;?, string? — The values by field id and the id of the&#x0a;button (or `exit_on_change` field, or &quot;timeout&quot;) that closed the form; nil if it&#x0a;was cancelled.">
 				<Param name="spec: opensak.FormSpec" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.geo" />
+		<KeyWord name="opensak.geo.regions" func="yes">
+			<Overload retVal="{name: string, country?: string}[]?" descr="The regions of a layer (&quot;country&quot;, &quot;state&quot; or &quot;county&quot;) in the boundary data&#x0a;used by Update location and opensak.chart.map, one row per name: `{name =}`, for&#x0a;states and counties also `country`. `within` limits them to one country or a&#x0a;list. With it a macro can say &quot;18 of 26 cantons&quot;. nil if the boundary data is&#x0a;not installed.&#x0a;Returns {name: string, country?: string}[]? — The regions, sorted.">
+				<Param name="[layer: string]" />
+				<Param name="[options: {within?: string|string[]}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.html" />
+		<KeyWord name="opensak.html.columns" func="yes">
+			<Overload retVal="string" descr="Put HTML parts (e.g. two charts) side by side; on a narrow window they go one&#x0a;below the other.&#x0a;Returns string — HTML.">
+				<Param name="...: string" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.html.escape" func="yes">
+			<Overload retVal="string" descr="*value* as text for HTML: `&amp; &lt; &gt; &quot; '` are escaped, nil becomes &quot;&quot;, 3.0 becomes&#x0a;&quot;3&quot;.&#x0a;Returns string — Escaped text.">
+				<Param name="value: any" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.html.matrix" func="yes">
+			<Overload retVal="string" descr="A matrix (from opensak.stats.pivot) as an HTML table: the values of the two&#x0a;fields as headings, each cell shaded by its value. `percent = true` shows each&#x0a;cell as a share of all, `totals = true` adds a total row and column, `shade =&#x0a;false` leaves the colours out; `row_title` and `col_title` name the fields,&#x0a;`color` (&quot;#rrggbb&quot;) the shading. Inline styles only, so it also works in a&#x0a;geocaching.com profile.&#x0a;Returns string — HTML.">
+				<Param name="matrix: opensak.Matrix" />
+				<Param name="[options: {shade?: boolean, percent?: boolean, totals?: boolean, row_title?: string, col_title?: string, color?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.html.page" func="yes">
+			<Overload retVal="string" descr="A complete HTML page for opensak.write_text: `title` (also the heading),&#x0a;`subtitle`, the body — the strings in the list part of the table, and/or `body`&#x0a;— and `footer`. A built-in stylesheet with a light and a dark theme styles&#x0a;headings (`&lt;h2&gt;`), tables, tiles, columns and charts; `css` is added after it.&#x0a;The body is put in as it is: build it from the html.* and chart.* functions, or&#x0a;escape your own text with html.escape.&#x0a;Returns string — The page.">
+				<Param name="spec: {title?: string, subtitle?: string, css?: string, lang?: string, footer?: string, body?: string|string[], [integer]: string}" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.html.table" func="yes">
+			<Overload retVal="string" descr="*rows* as an HTML table (values escaped). `columns` lists the fields to show,&#x0a;each a field name or `{field, heading}`; without it all fields are shown, sorted&#x0a;by name. Number columns are right-aligned. `link = { code = &quot;url&quot; }` turns the&#x0a;code cells into links to the row's url field (http/https only). `bars =&#x0a;{&quot;count&quot;}` adds a bar next to each value of those number fields, scaled to the&#x0a;largest (in `color`, &quot;#rrggbb&quot;). The bars use inline styles only, so the table&#x0a;can also be copied into a geocaching.com profile.&#x0a;Returns string — HTML.">
+				<Param name="rows: table[]" />
+				<Param name="[options: {columns?: (string|string[])[], link?: table&lt;string, string&gt;, caption?: string, bars?: string[], color?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.html.tiles" func="yes">
+			<Overload retVal="string" descr="Key figures as a row of tiles: a list of `{label =, value =}`.&#x0a;Returns string — HTML.">
+				<Param name="items: {label: string, value: any}[]" />
 			</Overload>
 		</KeyWord>
 		<KeyWord name="opensak.input" func="yes">
@@ -605,6 +694,60 @@
 				<Param name="[options: opensak.ReadOptions]" />
 			</Overload>
 		</KeyWord>
+		<KeyWord name="opensak.stats" />
+		<KeyWord name="opensak.stats.every" func="yes">
+			<Overload retVal="table[]" descr="Every *step*-th row of *rows*, e.g. every 1000th find (sort the rows first, see&#x0a;opensak.stats.sort): copies with the row number in `n`. The first and the last&#x0a;row are included unless `first = false` / `last = false`. With `date = field`,&#x0a;`days` holds the days since the previous row picked.&#x0a;Returns table[] — Copies of the picked rows.">
+				<Param name="rows: table[]" />
+				<Param name="step: integer" />
+				<Param name="[options: {first?: boolean, last?: boolean, date?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.fill" func="yes">
+			<Overload retVal="table[]" descr="*rows* sorted by the period in field `key` (default &quot;key&quot;), with a row added for&#x0a;each missing &quot;day&quot;, &quot;month&quot; (default) or &quot;year&quot; between the first and the last&#x0a;row, or between `from` and `to`. Number fields of an added row are 0. Use it&#x0a;before a line chart, so months without finds still take their place on the x&#x0a;axis.&#x0a;Returns table[] — New rows.">
+				<Param name="rows: table[]" />
+				<Param name="[options: {key?: string, period?: string, from?: string, to?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.group" func="yes">
+			<Overload retVal="{key: any, count: integer, distinct?: integer, sum?: number}[]" descr="Count *rows* per value of the field *by* and return one row per group: `{key =,&#x0a;count =}`, sorted by key. Rows can come from opensak.caches(), opensak.sql() or&#x0a;opensak.read_csv(); rows whose *by* is nil are left out. Options: `period`&#x0a;groups a date field (&quot;YYYY-MM-DD&quot; or os.time() seconds) by &quot;day&quot;, &quot;week&quot;&#x0a;(&quot;2026-W41&quot;), &quot;month&quot; (&quot;2026-10&quot;), &quot;year&quot; or &quot;weekday&quot; (&quot;Mon&quot;…&quot;Sun&quot;, sorted&#x0a;Monday first). `count_distinct = field` adds `distinct`, the number of different&#x0a;values of that field per group; `sum = field` adds `sum`. `sort = &quot;count&quot;` (or&#x0a;&quot;sum&quot;) puts the largest group first. `top = n` keeps n groups and puts the rest&#x0a;into one group named `other` (default &quot;Other&quot;).&#x0a;Returns {key: any, count: integer, distinct?: integer, sum?: number}[] — One row&#x0a;per group.">
+				<Param name="rows: table[]" />
+				<Param name="by: string" />
+				<Param name="[options: {period?: string, count_distinct?: string, sum?: string, sort?: string, top?: integer, other?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.pivot" func="yes">
+			<Overload retVal="opensak.Matrix" descr="Count *rows* per pair of values of two fields, e.g. difficulty × terrain.&#x0a;Returns `{rows =, cols =, cells =, max =, total =}`: `rows` and `cols` are the&#x0a;values of the two fields (sorted), `cells[i][j]` the count for rows[i] and&#x0a;cols[j]. The options `rows` and `cols` give the values and their order instead&#x0a;(other values are left out); `sum = field` adds up that field instead of&#x0a;counting. For opensak.chart.heatmap.&#x0a;Returns opensak.Matrix — The matrix.">
+				<Param name="rows: table[]" />
+				<Param name="row_field: string" />
+				<Param name="col_field: string" />
+				<Param name="[options: {rows?: any[], cols?: any[], sum?: string}]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.running" func="yes">
+			<Overload retVal="table[]" descr="Copies of *rows* with the running total of *field* (default &quot;count&quot;) in *into*&#x0a;(default &quot;total&quot;), e.g. the total number of finds at the end of each month.&#x0a;Returns table[] — New rows.">
+				<Param name="rows: table[]" />
+				<Param name="[field: string]" />
+				<Param name="[into: string]" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.sort" func="yes">
+			<Overload retVal="table[]" descr="A new list of *rows* sorted by the fields in turn; &quot;-field&quot; sorts largest first.&#x0a;nil values come last. Faster than table.sort with a compare function, and&#x0a;stable: rows with equal fields keep their order.&#x0a;Returns table[] — The same rows in the new order.">
+				<Param name="rows: table[]" />
+				<Param name="...: string" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.streaks" func="yes">
+			<Overload retVal="{days: integer, longest?: opensak.Run, gap?: opensak.Run, last?: opensak.Run}" descr="Runs of days in a date field: `days` (the number of different days), `longest`&#x0a;(most days in a row with at least one row, e.g. your longest caching streak),&#x0a;`gap` (most days in a row without, between the first and the last day) and&#x0a;`last` (the run that ends on the last day). Each run is `{days =, first =, last&#x0a;=}`; `gap` is nil if there is none.&#x0a;Returns {days: integer, longest?: opensak.Run, gap?: opensak.Run, last?:&#x0a;opensak.Run} — The runs.">
+				<Param name="rows: table[]" />
+				<Param name="field: string" />
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.stats.summary" func="yes">
+			<Overload retVal="{count: integer, distinct: integer, min?: any, max?: any, sum?: number, mean?: number, median?: number}" descr="Key figures of *field* over *rows* (nil values left out): `count`, `distinct`,&#x0a;`min` and `max` (also for dates and text), and for numbers `sum`, `mean` and&#x0a;`median`.&#x0a;Returns {count: integer, distinct: integer, min?: any, max?: any, sum?: number,&#x0a;mean?: number, median?: number} — The figures.">
+				<Param name="rows: table[]" />
+				<Param name="field: string" />
+			</Overload>
+		</KeyWord>
 		<KeyWord name="opensak.switch_database" func="yes">
 			<Overload descr="Make another database the active one, as the toolbar dropdown does. The active&#x0a;filter is cleared.">
 				<Param name="name: string" />
@@ -647,6 +790,13 @@
 		</KeyWord>
 		<KeyWord name="opensak.version" func="yes">
 			<Overload retVal="string" descr="The OpenSAK version this macro runs in.&#x0a;Returns string — Version, e.g. &quot;1.21.0-beta.3&quot;.">
+			</Overload>
+		</KeyWord>
+		<KeyWord name="opensak.write_text" func="yes">
+			<Overload retVal="string" descr="Write *text* to a file as UTF-8 and return the file written. A relative path is&#x0a;resolved against the macro file's folder. The folder needs write permission (the&#x0a;OpenSAK temp folder, opensak.temp_dir(), has it by default); for an unapproved&#x0a;one the user is asked first. Only these file types can be written: .txt .csv&#x0a;.tsv .html .htm .svg .md .json. An existing file is replaced, or extended with&#x0a;`append = true`. At most 20 MB.&#x0a;Returns string — The file written (full path).">
+				<Param name="path: string" />
+				<Param name="text: string" />
+				<Param name="[options: {append?: boolean}]" />
 			</Overload>
 		</KeyWord>
 		<KeyWord name="or" />

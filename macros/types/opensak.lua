@@ -48,8 +48,9 @@
 ---@field mode? "AND"|"OR" How the criteria are combined (default AND).
 ---@field label? string Shown in the toolbar (optional, default "Macro").
 
----Filter keys plus `fields` and `database`, understood by `opensak.caches{}`.
+---Filter keys plus `fields`, `all` and `database`, understood by `opensak.caches{}`.
 ---@class opensak.CachesSpec: opensak.FilterSpec
+---@field all? boolean Every cache of the database, whatever the active filter shows.
 ---@field fields? string[] Cache fields to load (`code` is always included).
 ---@field database? string Read this database instead of the active one.
 
@@ -61,6 +62,20 @@
 ---@class opensak.TransferOptions
 ---@field codes? string[] GC codes to transfer (default: the caches of the active filter).
 ---@field if_exists? "newer"|"replace"|"skip" When the cache exists in the target (default "newer").
+
+---A matrix from `opensak.stats.pivot()`, for `opensak.chart.heatmap()`.
+---@class opensak.Matrix
+---@field rows any[] Values of the row field.
+---@field cols any[] Values of the column field.
+---@field cells number[][] `cells[i][j]`: the count for rows[i] and cols[j].
+---@field max number The largest cell.
+---@field total number Sum of all cells.
+
+---A run of days from `opensak.stats.streaks()`.
+---@class opensak.Run
+---@field days integer Number of days.
+---@field first string First day, "YYYY-MM-DD".
+---@field last string Last day, "YYYY-MM-DD".
 
 ---What `opensak.export_gpx{}` writes.
 ---@class opensak.ExportSpec
@@ -213,6 +228,7 @@
 ---@field trackable_count integer Number of trackables in the cache.
 ---@field last_log_date string? Date of the latest log, "YYYY-MM-DD".
 ---@field last_gpx_update string? When an import last touched the cache, "YYYY-MM-DDTHH:MM:SS"; finds caches the latest Pocket Query did not refresh.
+---@field [string] any
 
 ---The OpenSAK API, available as a global in every macro.
 opensak = {}
@@ -318,9 +334,9 @@ function opensak.profiles() end
 ---@return opensak.Cache? # The cache, or nil if it is not in the database.
 function opensak.cache(code, options) end
 
----Iterate over caches, one table per cache (see Cache fields), in a generic `for`. Without arguments: the caches of the active filter, in grid order. With filter keys (see Filter keys): the caches matching them, sorted by name; the view and the active filter stay unchanged. `database` reads another database, without switching: its caches matching the filter keys, or all of them, sorted by name. `fields` limits the fields loaded (`code` is always included), which makes loops over many caches faster. Caches are loaded in chunks, so large databases do not hit the memory limit.
+---Iterate over caches, one table per cache (see Cache fields), in a generic `for`. Without arguments: the caches of the active filter, in grid order. With filter keys (see Filter keys): the caches matching them, sorted by name; the view and the active filter stay unchanged. `all = true`: every cache of the database, sorted by name, whatever the active filter shows. `database` reads another database, without switching: its caches matching the filter keys, or all of them, sorted by name. `fields` limits the fields loaded (`code` is always included), which makes loops over many caches faster. Caches are loaded in chunks, so large databases do not hit the memory limit.
 ---
----Since API version 2.
+---Since API version 2. Changed in API version 3: added `all`.
 ---
 ---```lua
 ---for c in opensak.caches() do print(c.code, c.name) end
@@ -554,6 +570,21 @@ function opensak.clear_corrected(code) end
 ---@param sep? string Separator character; detected among , ; and tab if omitted.
 ---@return table<string, string>[] # One table per data row, keyed by header.
 function opensak.read_csv(path, sep) end
+
+---Write *text* to a file as UTF-8 and return the file written. A relative path is resolved against the macro file's folder. The folder needs write permission (the OpenSAK temp folder, opensak.temp_dir(), has it by default); for an unapproved one the user is asked first. Only these file types can be written: .txt .csv .tsv .html .htm .svg .md .json. An existing file is replaced, or extended with `append = true`. At most 20 MB.
+---
+---Since API version 3.
+---
+---```lua
+---local path = opensak.write_text(opensak.temp_dir() .. "/report.html",
+---  "<h1>" .. opensak.count() .. " caches</h1>")
+---print("written: " .. path)
+---```
+---@param path string The file to write.
+---@param text string The content.
+---@param options? {append?: boolean} `append`: add *text* at the end of an existing file.
+---@return string # The file written (full path).
+function opensak.write_text(path, text, options) end
 
 ---Export the caches of the active filter with a saved export setting (File → Export → GPX/LOC/GGZ: format, folder, file name, if the file exists, corrected coordinates, max. caches). The file name variables are filled in as in the dialog, {filter} with the name of the active filter and {center} with the active centre point. The file goes into *folder* if given, else into the setting's folder. That folder needs write permission (Settings → Folder permissions); for an unapproved one the user is asked first. Nothing is written when no cache with coordinates is shown, or when the file exists and the setting says skip (or ask, and the user answers No).
 ---
@@ -1082,6 +1113,321 @@ function opensak.text.word_value(text) end
 ---@return string # The safe name.
 function opensak.text.normalize_name(s) end
 
+opensak.chart = {}
+
+---A bar chart of *rows* as an SVG string, for an HTML page (opensak.write_text) or a .svg file. Each row is a table; `x` names its category field (default "key") and `y` its value field (default "count"), nil counts as 0. `horizontal = true` draws the bars from the left, for long category names. Text and grid lines take the colour of the surrounding page; the bars use the CSS variable --chart-color, else `color`. Each bar shows its value as tooltip; `labels` also writes it on the bar (default: up to 16 bars). With a list of fields as `y`, the bars are stacked, one segment per field, with a legend (`names` instead of the field names; at most 8); a matrix from opensak.stats.pivot gives one stacked bar per matrix row, e.g. finds per year and cache type. At most 5000 rows.
+---
+---Since API version 3.
+---
+---```lua
+---local rows = opensak.sql([[SELECT strftime('%Y', found_date) AS year,
+---  COUNT(*) AS finds FROM caches WHERE found GROUP BY year ORDER BY year]])
+---local svg = opensak.chart.bar(rows, { x = "year", y = "finds", title = "Finds per year" })
+---opensak.write_text(opensak.temp_dir() .. "/finds.svg", svg)
+----- stacked: finds per year and type
+---local by_type = opensak.stats.pivot(finds, "year", "type")
+---local svg2 = opensak.chart.bar(by_type, { title = "Finds per year and type" })
+---```
+---@param rows table[]|opensak.Matrix The rows, e.g. the result of opensak.sql(), or a matrix.
+---@param options? {x?: string, y?: string|string[], title?: string, width?: number, height?: number, color?: string, horizontal?: boolean, labels?: boolean, names?: string[]} Fields to draw, title, size in pixels (default 640 × 280), colour (name or "#rrggbb").
+---@return string # The chart as SVG.
+function opensak.chart.bar(rows, options) end
+
+---A line chart of *rows* in their order as an SVG string, like opensak.chart.bar: `x` the label on the x axis (evenly spaced, e.g. months), `y` the value. `area = true` fills below the line. The value of the last point is written next to it unless `labels = false`. Each point shows its value as tooltip.
+---
+---Since API version 3.
+---
+---```lua
+---local rows, total = {}, 0
+---for _, r in ipairs(opensak.sql([[SELECT strftime('%Y-%m', found_date) AS month,
+---    COUNT(*) AS n FROM caches WHERE found GROUP BY month ORDER BY month]])) do
+---  total = total + r.n
+---  rows[#rows + 1] = { key = r.month, count = total }
+---end
+---local svg = opensak.chart.line(rows, { title = "Total finds", area = true })
+---```
+---@param rows table[] The rows, in the order to draw.
+---@param options? {x?: string, y?: string, title?: string, width?: number, height?: number, color?: string, area?: boolean, labels?: boolean} As for opensak.chart.bar, plus `area`.
+---@return string # The chart as SVG.
+function opensak.chart.line(rows, options) end
+
+---A grid chart of a matrix (see opensak.stats.pivot) as an SVG string: one cell per row × column value, the darker the larger, e.g. finds per difficulty × terrain. `labels = false` leaves the numbers out of the cells; `row_title` and `col_title` name the two fields.
+---
+---Since API version 3.
+---
+---```lua
+---local dt = opensak.stats.pivot(finds, "difficulty", "terrain",
+---  { rows = {1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5}, cols = {1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5} })
+---local svg = opensak.chart.heatmap(dt, { row_title = "D", col_title = "T" })
+---```
+---@param matrix opensak.Matrix The result of opensak.stats.pivot().
+---@param options? {title?: string, width?: number, color?: string, labels?: boolean, row_title?: string, col_title?: string} As for opensak.chart.bar, plus the field titles.
+---@return string # The chart as SVG.
+function opensak.chart.heatmap(matrix, options) end
+
+---A rose (polar area) chart of *rows* as an SVG string: one sector per row, in row order clockwise from the top, e.g. finds per compass direction (N, NE, E, …). The area of a sector grows with its value; `x` names the label field, `y` the value (as for opensak.chart.bar).
+---
+---Since API version 3.
+---
+---```lua
+---local DIRS = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" }
+---for _, c in ipairs(finds) do
+---  c.dir = DIRS[math.floor((opensak.coords.bearing(HOME_LAT, HOME_LON, c.lat, c.lon) + 22.5) / 45) % 8 + 1]
+---end
+---local rows = {}
+---for _, g in ipairs(opensak.stats.group(finds, "dir")) do rows[g.key] = g.count end
+---local sectors = {}
+---for i, d in ipairs(DIRS) do sectors[i] = { key = d, count = rows[d] or 0 } end
+---local svg = opensak.chart.rose(sectors, { title = "Finds by direction" })
+---```
+---@param rows table[] One row per sector, clockwise from north.
+---@param options? {x?: string, y?: string, title?: string, width?: number, color?: string, labels?: boolean} As for opensak.chart.bar; `width` is also the height.
+---@return string # The chart as SVG.
+function opensak.chart.rose(rows, options) end
+
+---A map of countries, states or counties as an SVG string, each region coloured by a value — e.g. finds per country from opensak.stats.group. `key` names the field with the region name (default "key"), `value` the number (default "count"), `layer` the kind of region: "country" (default), "state" or "county". `within` (a country name or a list) limits a state or county map to those countries; without it the countries the regions are in are shown. `extent = "all"` shows every region of the layer instead of zooming to the ones with a value. Names are matched ignoring case, accents and punctuation; those that match no region are listed below the map. The outlines are those of Update location (offline, no internet needed; county outlines are downloaded per country on first use, like there). Without the boundary data the map is a short note instead.
+---
+---Since API version 3.
+---
+---```lua
+---local countries = opensak.stats.group(finds, "country")
+---local map = opensak.chart.map(countries, { title = "Finds per country" })
+---local cantons = opensak.stats.group(finds, "state")
+---local map2 = opensak.chart.map(cantons, { layer = "state", within = "Switzerland" })
+---```
+---@param rows table[] One row per region with its value.
+---@param options? {key?: string, value?: string, layer?: string, within?: string|string[], title?: string, width?: number, height?: number, color?: string, extent?: string, legend?: boolean} See above. The height follows the shape of the area unless given.
+---@return string # The map as SVG.
+function opensak.chart.map(rows, options) end
+
+---A dot map as an SVG string: one dot per row at its coordinates (fields `lat` and `lon`), over the outlines of `layer` ("country", "state" or "county"), zoomed to the dots or to the `within` countries. `label` names the field shown as tooltip. At most 50000 rows; dots on the same pixel are drawn once.
+---
+---Since API version 3.
+---
+---```lua
+---local svg = opensak.chart.points(finds, { label = "name", title = "My finds" })
+---```
+---@param rows table[] The rows, e.g. caches from opensak.caches().
+---@param options? {lat?: string, lon?: string, label?: string, layer?: string, within?: string|string[], title?: string, width?: number, height?: number, color?: string, radius?: number} See above; `radius` of the dots in pixels (default 2.5).
+---@return string # The map as SVG.
+function opensak.chart.points(rows, options) end
+
+opensak.geo = {}
+
+---The regions of a layer ("country", "state" or "county") in the boundary data used by Update location and opensak.chart.map, one row per name: `{name =}`, for states and counties also `country`. `within` limits them to one country or a list. With it a macro can say "18 of 26 cantons". nil if the boundary data is not installed.
+---
+---Since API version 3.
+---
+---```lua
+---local cantons = opensak.geo.regions("state", { within = "Switzerland" })
+---if cantons then print(#cantons .. " cantons") end
+---```
+---@param layer? string "country" (default), "state" or "county".
+---@param options? {within?: string|string[]} See above.
+---@return {name: string, country?: string}[]? # The regions, sorted.
+function opensak.geo.regions(layer, options) end
+
+opensak.stats = {}
+
+---Count *rows* per value of the field *by* and return one row per group: `{key =, count =}`, sorted by key. Rows can come from opensak.caches(), opensak.sql() or opensak.read_csv(); rows whose *by* is nil are left out. Options: `period` groups a date field ("YYYY-MM-DD" or os.time() seconds) by "day", "week" ("2026-W41"), "month" ("2026-10"), "year" or "weekday" ("Mon"…"Sun", sorted Monday first). `count_distinct = field` adds `distinct`, the number of different values of that field per group; `sum = field` adds `sum`. `sort = "count"` (or "sum") puts the largest group first. `top = n` keeps n groups and puts the rest into one group named `other` (default "Other").
+---
+---Since API version 3.
+---
+---```lua
+---local finds = {}
+---for c in opensak.caches{ found = true, fields = {"found_date", "type"} } do
+---  finds[#finds + 1] = c
+---end
+---for _, g in ipairs(opensak.stats.group(finds, "found_date",
+---    { period = "year", count_distinct = "found_date" })) do
+---  print(g.key, g.count .. " finds", g.distinct .. " cache days")
+---end
+---local types = opensak.stats.group(finds, "type", { sort = "count", top = 8 })
+---```
+---@param rows table[] The rows.
+---@param by string The field to group by.
+---@param options? {period?: string, count_distinct?: string, sum?: string, sort?: string, top?: integer, other?: string} See above.
+---@return {key: any, count: integer, distinct?: integer, sum?: number}[] # One row per group.
+function opensak.stats.group(rows, by, options) end
+
+---*rows* sorted by the period in field `key` (default "key"), with a row added for each missing "day", "month" (default) or "year" between the first and the last row, or between `from` and `to`. Number fields of an added row are 0. Use it before a line chart, so months without finds still take their place on the x axis.
+---
+---Since API version 3.
+---
+---```lua
+---local months = opensak.stats.fill(
+---  opensak.stats.group(finds, "found_date", { period = "month" }))
+---```
+---@param rows table[] The rows, e.g. from opensak.stats.group.
+---@param options? {key?: string, period?: string, from?: string, to?: string} Field with the period, its length, first and last period (e.g. "2020-01").
+---@return table[] # New rows.
+function opensak.stats.fill(rows, options) end
+
+---Copies of *rows* with the running total of *field* (default "count") in *into* (default "total"), e.g. the total number of finds at the end of each month.
+---
+---Since API version 3.
+---
+---```lua
+---local total = opensak.stats.running(months)   -- months[i].total
+---local svg = opensak.chart.line(total, { y = "total", area = true })
+---```
+---@param rows table[] The rows, in order.
+---@param field? string The number field to add up.
+---@param into? string The field for the total.
+---@return table[] # New rows.
+function opensak.stats.running(rows, field, into) end
+
+---Count *rows* per pair of values of two fields, e.g. difficulty × terrain. Returns `{rows =, cols =, cells =, max =, total =}`: `rows` and `cols` are the values of the two fields (sorted), `cells[i][j]` the count for rows[i] and cols[j]. The options `rows` and `cols` give the values and their order instead (other values are left out); `sum = field` adds up that field instead of counting. For opensak.chart.heatmap.
+---
+---Since API version 3.
+---
+---```lua
+---local dt = opensak.stats.pivot(finds, "difficulty", "terrain")
+---print("D/T combinations: " .. dt.total)
+---```
+---@param rows table[] The rows.
+---@param row_field string Field for the rows of the matrix.
+---@param col_field string Field for the columns.
+---@param options? {rows?: any[], cols?: any[], sum?: string} See above.
+---@return opensak.Matrix # The matrix.
+function opensak.stats.pivot(rows, row_field, col_field, options) end
+
+---Every *step*-th row of *rows*, e.g. every 1000th find (sort the rows first, see opensak.stats.sort): copies with the row number in `n`. The first and the last row are included unless `first = false` / `last = false`. With `date = field`, `days` holds the days since the previous row picked.
+---
+---Since API version 3.
+---
+---```lua
+---local milestones = opensak.stats.every(finds, 1000, { date = "found_date" })
+---for _, m in ipairs(milestones) do print(m.n, m.found_date, m.code, m.days) end
+---```
+---@param rows table[] The rows, in order.
+---@param step integer Pick every step-th row.
+---@param options? {first?: boolean, last?: boolean, date?: string} See above.
+---@return table[] # Copies of the picked rows.
+function opensak.stats.every(rows, step, options) end
+
+---Key figures of *field* over *rows* (nil values left out): `count`, `distinct`, `min` and `max` (also for dates and text), and for numbers `sum`, `mean` and `median`.
+---
+---Since API version 3.
+---
+---```lua
+---local f = opensak.stats.summary(finds, "found_date")
+---print(f.count .. " finds on " .. f.distinct .. " days, first " .. f.min)
+---print("mean difficulty", opensak.stats.summary(finds, "difficulty").mean)
+---```
+---@param rows table[] The rows.
+---@param field string The field.
+---@return {count: integer, distinct: integer, min?: any, max?: any, sum?: number, mean?: number, median?: number} # The figures.
+function opensak.stats.summary(rows, field) end
+
+---A new list of *rows* sorted by the fields in turn; "-field" sorts largest first. nil values come last. Faster than table.sort with a compare function, and stable: rows with equal fields keep their order.
+---
+---Since API version 3.
+---
+---```lua
+---finds = opensak.stats.sort(finds, "found_date", "code")
+---local best = opensak.stats.sort(caches, "-favorite_points", "name")
+---```
+---@param rows table[] The rows.
+---@param ... string The fields to sort by.
+---@return table[] # The same rows in the new order.
+function opensak.stats.sort(rows, ...) end
+
+---Runs of days in a date field: `days` (the number of different days), `longest` (most days in a row with at least one row, e.g. your longest caching streak), `gap` (most days in a row without, between the first and the last day) and `last` (the run that ends on the last day). Each run is `{days =, first =, last =}`; `gap` is nil if there is none.
+---
+---Since API version 3.
+---
+---```lua
+---local s = opensak.stats.streaks(finds, "found_date")
+---print("longest streak: " .. s.longest.days .. " days, from " .. s.longest.first)
+---```
+---@param rows table[] The rows.
+---@param field string The date field.
+---@return {days: integer, longest?: opensak.Run, gap?: opensak.Run, last?: opensak.Run} # The runs.
+function opensak.stats.streaks(rows, field) end
+
+opensak.html = {}
+
+---*value* as text for HTML: `& < > " '` are escaped, nil becomes "", 3.0 becomes "3".
+---
+---Since API version 3.
+---
+---```lua
+---local cell = "<td>" .. opensak.html.escape(c.name) .. "</td>"
+---```
+---@param value any A string, number, boolean or nil.
+---@return string # Escaped text.
+function opensak.html.escape(value) end
+
+---*rows* as an HTML table (values escaped). `columns` lists the fields to show, each a field name or `{field, heading}`; without it all fields are shown, sorted by name. Number columns are right-aligned. `link = { code = "url" }` turns the code cells into links to the row's url field (http/https only). `bars = {"count"}` adds a bar next to each value of those number fields, scaled to the largest (in `color`, "#rrggbb"). The bars use inline styles only, so the table can also be copied into a geocaching.com profile.
+---
+---Since API version 3.
+---
+---```lua
+---local html = opensak.html.table(milestones, { columns = {
+---  {"n", "Find"}, {"found_date", "Date"}, {"code", "Code"}, {"name", "Name"} },
+---  link = { code = "url" } })
+---```
+---@param rows table[] The rows.
+---@param options? {columns?: (string|string[])[], link?: table<string, string>, caption?: string, bars?: string[], color?: string} See above.
+---@return string # HTML.
+function opensak.html.table(rows, options) end
+
+---A matrix (from opensak.stats.pivot) as an HTML table: the values of the two fields as headings, each cell shaded by its value. `percent = true` shows each cell as a share of all, `totals = true` adds a total row and column, `shade = false` leaves the colours out; `row_title` and `col_title` name the fields, `color` ("#rrggbb") the shading. Inline styles only, so it also works in a geocaching.com profile.
+---
+---Since API version 3.
+---
+---```lua
+---local dt = opensak.stats.pivot(finds, "difficulty", "terrain")
+---local html = opensak.html.matrix(dt, { row_title = "D", col_title = "T", totals = true })
+---```
+---@param matrix opensak.Matrix The matrix.
+---@param options? {shade?: boolean, percent?: boolean, totals?: boolean, row_title?: string, col_title?: string, color?: string} See above.
+---@return string # HTML.
+function opensak.html.matrix(matrix, options) end
+
+---Key figures as a row of tiles: a list of `{label =, value =}`.
+---
+---Since API version 3.
+---
+---```lua
+---local html = opensak.html.tiles{
+---  { label = "finds", value = f.count },
+---  { label = "cache days", value = f.distinct },
+---}
+---```
+---@param items {label: string, value: any}[] The tiles.
+---@return string # HTML.
+function opensak.html.tiles(items) end
+
+---Put HTML parts (e.g. two charts) side by side; on a narrow window they go one below the other.
+---
+---Since API version 3.
+---
+---```lua
+---local html = opensak.html.columns(chart1, chart2)
+---```
+---@param ... string The HTML parts (or one list of them).
+---@return string # HTML.
+function opensak.html.columns(...) end
+
+---A complete HTML page for opensak.write_text: `title` (also the heading), `subtitle`, the body — the strings in the list part of the table, and/or `body` — and `footer`. A built-in stylesheet with a light and a dark theme styles headings (`<h2>`), tables, tiles, columns and charts; `css` is added after it. The body is put in as it is: build it from the html.* and chart.* functions, or escape your own text with html.escape.
+---
+---Since API version 3.
+---
+---```lua
+---local page = opensak.html.page{
+---  title = "Find statistics", subtitle = opensak.database(),
+---  opensak.html.tiles{ { label = "finds", value = #finds } },
+---  "<h2>Finds per year</h2>",
+---  opensak.chart.bar(opensak.stats.group(finds, "found_date", { period = "year" })),
+---}
+---opensak.write_text(opensak.temp_dir() .. "/stats.html", page)
+---```
+---@param spec {title?: string, subtitle?: string, css?: string, lang?: string, footer?: string, body?: string|string[], [integer]: string} See above.
+---@return string # The page.
+function opensak.html.page(spec) end
+
 opensak.date = {}
 
 ---Parse a date into seconds since the epoch, the same kind of value as `os.time()`. Without a format, ISO 8601 (`"2026-10-06"`, `"2026-10-06T14:30:00Z"`) and `"06.10.2026 [14:30[:00]]"` are understood. Times without a zone are local time.
@@ -1108,6 +1454,34 @@ function opensak.date.parse(text, fmt) end
 ---@param fmt? string strftime format, "%Y-%m-%d" if omitted.
 ---@return string # The formatted date.
 function opensak.date.format(t, fmt) end
+
+---Whole days from date *a* to date *b* (negative if *b* is earlier). Dates are "YYYY-MM-DD" strings (a time after it is ignored) or seconds since the epoch.
+---
+---Since API version 3.
+---
+---```lua
+---print(opensak.date.diff("2026-01-01", "2026-10-06"))   -- 278
+---```
+---@param a string|number The first date.
+---@param b string|number The second date.
+---@return integer # Days.
+function opensak.date.diff(a, b) end
+
+---The period a date falls in, named as opensak.stats.group names it: "day" ("2026-10-06"), "week" ("2026-W41"), "month" ("2026-10"), "year" ("2026") or "weekday" ("Tue"). For a field of your own to group or pivot by, e.g. the year × month table of your finds.
+---
+---Since API version 3.
+---
+---```lua
+---for _, c in ipairs(finds) do
+---  c.year = opensak.date.period(c.found_date, "year")
+---  c.month = c.found_date:sub(6, 7)
+---end
+---local grid = opensak.stats.pivot(finds, "year", "month")
+---```
+---@param date string|number "YYYY-MM-DD" (a time after it is ignored) or seconds since the epoch.
+---@param period string "day", "week", "month", "year" or "weekday".
+---@return string # The period.
+function opensak.date.period(date, period) end
 
 opensak.settings = {}
 
