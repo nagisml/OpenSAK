@@ -47,7 +47,8 @@ def test_tiles_columns_and_page():
     tiles = report_html.tiles([{"label": "finds", "value": 12}])
     assert '<div class="value">12</div><div class="label">finds</div>' in tiles
     assert report_html.columns(["<i>1</i>", "<i>2</i>"]) == \
-        '<div class="columns"><div><i>1</i></div><div><i>2</i></div></div>'
+        ('<div class="columns"><!--osk-cols--><div><!--osk-c--><i>1</i></div><!--/osk-c-->'
+         '<div><!--osk-c--><i>2</i></div><!--/osk-c--></div><!--/osk-cols-->')   # marks for html.profile
     page = report_html.page(["<p>x</p>"], title="A & B", subtitle="<s>", footer="f")
     assert page.startswith("<!doctype html>") and "<title>A &amp; B</title>" in page
     assert "&lt;s&gt;" in page and "<p>x</p>" in page and "<footer>f</footer>" in page

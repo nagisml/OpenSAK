@@ -17,7 +17,10 @@ from opensak.macro import FolderApproval, MacroError, MacroRuntime
 from opensak.macro.permissions import temp_dir
 from opensak.export.file_export import active_database_name
 from opensak.stats import charts, tables
+from opensak.stats import html as report_html
 from opensak.stats import maps as report_maps
+from opensak.stats import profile
+from opensak.stats import vega as report_vega
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "macros" / "examples"
 
@@ -571,8 +574,18 @@ def _example(name):
     return (EXAMPLES / name).read_text(encoding="utf-8")
 
 
+def _check_profile(html):
+    """What a geocaching.com profile does not accept (a data: image even
+    fails the save with a server error)."""
+    assert html.startswith('<div style="') and html.rstrip().endswith("</div>")
+    for bad in ("<svg", "<script", "<style", "class=", "var(", "rgba(", "data:", "<!--"):
+        assert bad not in html, bad
+
+
 @pytest.mark.parametrize("name", ["find_statistics.lua", "database_statistics.lua",
-                                  "region_coverage.lua"])
+                                  "region_coverage.lua", "find_statistics_vega.lua",
+                                  "database_statistics_vega.lua",
+                                  "find_statistics_extended.lua"])
 def test_statistics_examples_state_their_limitations(name):
     head = _example(name).split("\nlocal ", 1)[0]
     assert "-- Known limitations:" in head
@@ -592,8 +605,15 @@ def test_find_statistics_example(finds_db, boundaries):
     host = OpenHost()
     out = _run(source, host)
     target = temp_dir() / "find_statistics.html"
-    assert out == [f"4 finds → {target}"]
+    profile_file = temp_dir() / "find_statistics_profile.html"
+    assert out == [f"4 finds → {target}",
+                   f"For your geocaching.com profile → {profile_file}",
+                   "Open it in a text editor, copy everything and paste it into the profile."]
     assert host.opened == [target] and host.asked == []
+    profile_page = profile_file.read_text(encoding="utf-8")
+    _check_profile(profile_page)
+    assert "Find statistics" in profile_page and "Milestones" in profile_page
+    assert 'bgcolor="#2a78d6"' in profile_page        # the charts as table bars
     page = target.read_text(encoding="utf-8")
 
     assert _tile(page, "finds") == "4"
@@ -661,8 +681,14 @@ def test_database_statistics_example(finds_db, boundaries):
     host = EmptyFilterHost()
     out = _run(_example("database_statistics.lua"), host)
     target = temp_dir() / "database_statistics.html"
-    assert out == [f"5 caches → {target}"]
+    profile_file = temp_dir() / "database_statistics_profile.html"
+    assert out == [f"5 caches → {target}",
+                   f"For your geocaching.com profile → {profile_file}",
+                   "Open it in a text editor, copy everything and paste it into the profile."]
     assert host.opened == [target]
+    profile_page = profile_file.read_text(encoding="utf-8")
+    _check_profile(profile_page)
+    assert "&lt;Eve&gt;" in profile_page and "<Eve>" not in profile_page
     page = target.read_text(encoding="utf-8")
 
     assert _tile(page, "caches") == "5"
@@ -821,3 +847,249 @@ def test_examples_measure_from_the_active_centre(finds_db, boundaries):
     _run(_example("region_coverage.lua"), EmptyFilterHost())
     page = (temp_dir() / "region_coverage.html").read_text(encoding="utf-8")
     assert re.search(r'<td>South Ä</td><td class="num">0</td>', page)
+
+
+# ── opensak.chart.vega (Vega-Lite) and the *_vega.lua examples ─────────────
+
+def _vega_spec(html_text: str) -> list[dict]:
+    import json
+
+    return [json.loads(m)
+            for m in re.findall(r'data-opensak-vega="[^"]+" data-actions="\w+">(.*?)</script>',
+                                html_text, re.S)]
+
+
+def test_vendored_vega_files_are_there():
+    folder = report_vega.assets_dir()
+    for name in ("vega.min.js", "vega-lite.min.js", "vega-embed.min.js",
+                 "LICENSE-vega.txt", "LICENSE-vega-lite.txt", "LICENSE-vega-embed.txt"):
+        assert (folder / name).is_file(), name
+    readme = (folder / "README.md").read_text(encoding="utf-8")
+    for package, version in report_vega.VERSIONS.items():
+        assert f"`{package}@{version}`" in readme
+
+
+def test_vega_snippet_escapes_and_adds_the_schema():
+    out = report_vega.snippet({"data": {"values": [{"a": "</script><!-- x"}]}, "mark": "bar"},
+                              actions=False)
+    assert out.count("</script>") == 1 and "<!--" not in out   # only the closing tag
+    assert 'data-actions="false"' in out and "\\u003c/script>" in out
+    (spec,) = _vega_spec(out)
+    assert spec["$schema"] == report_vega.SCHEMA
+    assert spec["data"]["values"][0]["a"] == "</script><!-- x"
+
+
+@pytest.mark.parametrize("spec, message", [
+    ("bar", "spec must be a table"),
+    ({"x": float("nan")}, "not a number JSON can hold"),
+    ({1: "a"}, "keys must be strings"),
+    ({"x": object()}, "cannot go into a chart"),
+])
+def test_vega_snippet_errors(spec, message):
+    with pytest.raises(report_vega.VegaError, match=message):
+        report_vega.snippet(spec)
+
+
+def test_page_inlines_the_vega_files_once_and_only_when_needed():
+    chart = report_vega.snippet({"mark": "bar"})
+    page = report_html.page([chart, report_vega.snippet({"mark": "line"})], title="V")
+    assert page.count("vegaEmbed(target") == 1               # the start-up script, once
+    assert len(page) > 500_000                                # the three files inline
+    assert page.index("data-opensak-vega") < page.index("vegaEmbed(target")
+    plain = report_html.page(["<p>no charts</p>"], title="P")
+    assert "vegaEmbed" not in plain and len(plain) < 10_000
+
+
+def test_chart_vega_from_lua():
+    out = _run("""
+        local rows = { { year = 2024, n = 3 }, { year = 2025, n = 5 } }
+        local html = opensak.chart.vega({
+            data = { values = rows },
+            mark = "bar",
+            encoding = { x = { field = "year", type = "ordinal" },
+                         y = { field = "n", type = "quantitative" } },
+        }, { actions = false })
+        print(html:find('data-actions="false"', 1, true) ~= nil)
+        print(html)
+    """)
+    assert out[0] == "true"
+    (spec,) = _vega_spec(out[1])
+    assert spec["data"]["values"] == [{"year": 2024, "n": 3}, {"year": 2025, "n": 5}]
+    assert spec["encoding"]["x"] == {"field": "year", "type": "ordinal"}
+
+
+@pytest.mark.parametrize("call, message", [
+    ('opensak.chart.vega("bar")', "expects a Vega-Lite spec as a table"),
+    ('opensak.chart.vega({ mark = "bar" }, { theme = "x" })', "options must be a table"),
+    ('opensak.chart.vega({ mark = "bar" }, { actions = 1 })', "actions must be true or false"),
+    ('opensak.chart.vega({ data = { values = { { x = 0/0 } } } })', "not a number JSON can hold"),
+    ('opensak.chart.vega({ f = print })', "cannot go into a chart"),
+])
+def test_chart_vega_errors_from_lua(call, message):
+    with pytest.raises(MacroError, match=message):
+        _run(call)
+
+
+def _place_finds(db):
+    """The finds of finds_db inside the fixture countries Alpha and Beta."""
+    _describe(db, {
+        "GCA": {"latitude": 47.0, "longitude": 5.0, "country": "Alpha", "state": "North A"},
+        "GCB": {"latitude": 46.0, "longitude": 6.0, "country": "Alpha", "state": "North A"},
+        "GCN": {"latitude": 42.0, "longitude": 5.0, "country": "Alpha", "state": "South A"},
+        "GCZ": {"latitude": 45.0, "longitude": 15.0, "country": "Beta", "state": "Beta One"},
+    })
+
+
+def test_find_statistics_vega_example(finds_db, boundaries):
+    _place_finds(finds_db)
+    host = OpenHost()
+    out = _run(_example("find_statistics_vega.lua"), host)
+    target = temp_dir() / "find_statistics_vega.html"
+    assert out == [f"4 finds → {target}"]
+    assert host.opened == [target]
+    page = target.read_text(encoding="utf-8")
+    assert page.count("vegaEmbed(target") == 1
+    # The same key figures as find_statistics.lua.
+    assert _tile(page, "finds") == "4" and _tile(page, "longest break (days)") == "63"
+    assert _tile(page, "countries") == "2 / 2" and _tile(page, "states in Alpha") == "2 / 2"
+    dashboard, total, rose, distance, countries, states, where = _vega_spec(page)
+    # One data set for the linked dashboard: the four finds.
+    assert sorted(r["date"] for r in dashboard["data"]["values"]) == [
+        "2023-12-31", "2024-03-04", "2024-03-04", "2024-05-01"]
+    assert {r["weekday"] for r in dashboard["data"]["values"]} == {"Sun", "Mon", "Wed"}
+    params = [v.get("params") for v in dashboard["vconcat"] if v.get("params")]
+    assert params[0][0]["name"] == "period"
+    assert dashboard["resolve"]["scale"]["y"] == "independent"
+    # Months filled from Dec 2023 to May 2024; Vega-Lite adds them up.
+    assert [m["key"] for m in total["data"]["values"]] == [
+        "2023-12", "2024-01", "2024-02", "2024-03", "2024-04", "2024-05"]
+    assert total["transform"][0]["window"][0]["op"] == "sum"
+    assert [d["key"] for d in rose["data"]["values"]] == ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    assert sum(d["count"] for d in rose["data"]["values"]) == 4
+    assert sum(d["count"] for d in distance["data"]["values"]) == 4
+    # Maps from geo.outlines: values in the properties, matched by name.
+    by_name = {f["properties"]["name"]: f["properties"].get("count")
+               for f in countries["layer"][-1]["data"]["values"]["features"]}
+    assert by_name == {"Alpha": 3, "Beta": 1}
+    state_counts = {f["properties"]["name"]: f["properties"].get("count")
+                    for f in states["layer"][-1]["data"]["values"]["features"]}
+    assert state_counts == {"North A": 2, "South Ä": 1}
+    assert len(where["layer"][1]["data"]["values"]) == 4
+    assert "Names that match no region" not in page
+
+
+def test_find_statistics_vega_example_without_boundary_data(finds_db):
+    out = _run(_example("find_statistics_vega.lua"), OpenHost())
+    assert out[0].startswith("4 finds → ")
+    page = (temp_dir() / "find_statistics_vega.html").read_text(encoding="utf-8")
+    assert "Maps need the boundary data" in page
+    assert len(_vega_spec(page)) == 4                       # no map charts
+    assert _tile(page, "countries") == "0"
+
+
+def test_database_statistics_vega_example(finds_db, boundaries):
+    _place_finds(finds_db)
+    _describe(finds_db, {
+        "GCA": {"hidden_date": datetime(2020, 5, 1), "container": "Small"},
+        "GCB": {"hidden_date": datetime(2022, 1, 1), "container": "Micro"},
+        "GCZ": {"hidden_date": datetime(2022, 1, 2), "archived": True},
+        "GCX": {"hidden_date": datetime(2023, 3, 3), "country": "Alpha", "state": "South A",
+                "latitude": 42.0, "longitude": 5.0},
+    })
+    host = EmptyFilterHost()
+    out = _run(_example("database_statistics_vega.lua"), host)
+    target = temp_dir() / "database_statistics_vega.html"
+    assert out == [f"5 caches → {target}"]
+    assert host.opened == [target]
+    page = target.read_text(encoding="utf-8")
+    assert _tile(page, "caches") == "5" and _tile(page, "still to find (active)") == "1"
+    assert _tile(page, "countries") == "2 / 2" and _tile(page, "states in Alpha") == "2 / 2"
+    dashboard = _vega_spec(page)[0]
+    rows = dashboard["data"]["values"]
+    assert sum(r["n"] for r in rows) == 5                  # every cache counted once
+    assert dashboard["vconcat"][0]["params"][0]["name"] == "years"
+    todo = dashboard["vconcat"][3]["hconcat"][1]["transform"]
+    assert todo[1] == {"filter": "datum.status == 'active' && datum.found == 'not found'"}
+    # "Still to find in Alpha": GCX in South Ä.
+    specs = _vega_spec(page)
+    state_map = [s for s in specs if s.get("title") == "Still to find in Alpha"][0]
+    counts = {f["properties"]["name"]: f["properties"].get("count")
+              for f in state_map["layer"][-1]["data"]["values"]["features"]}
+    assert counts == {"North A": None, "South Ä": 1}
+
+
+def test_database_statistics_vega_country_setting(finds_db, boundaries):
+    _place_finds(finds_db)
+    source = _example("database_statistics_vega.lua").replace(
+        "local COUNTRY = nil", 'local COUNTRY = "Beta"')
+    _run(source, EmptyFilterHost())
+    page = (temp_dir() / "database_statistics_vega.html").read_text(encoding="utf-8")
+    assert _tile(page, "states in Beta") == "1 / 1"
+    assert any(s.get("title") == "Still to find in Beta" for s in _vega_spec(page))
+
+
+# ── html.profile: the geocaching.com profile version ─────────────────────
+
+def test_profile_keeps_twins_and_drops_what_a_profile_refuses():
+    page = report_html.page([
+        report_html.tiles([{"label": "finds", "value": 12}]),
+        report_html.columns(["<h2>A</h2>" + profile.dual("<svg><title>x</title></svg>", "<p>bars</p>"),
+                             "<p>B -- C</p>"]),
+        report_html.table([{"n": 3}], bars=["n"]),
+        '<img src="data:image/png;base64,AAAA"><script>x()</script><p class="mine">own</p>',
+    ], title="T", subtitle="S", footer="F")
+    out = report_html.profile_page(page)
+    _check_profile(out)
+    assert "<p>bars</p>" in out and "<title>" not in out          # the twin, not the SVG
+    assert "<td" in out and ">12</span>" in out                   # tiles as a table
+    assert "<p>B -- C</p>" in out and "<p>own</p>" in out
+    assert out.count("<h1") == 1 and "S</p>" in out and "F</p>" in out
+
+
+def test_profile_twin_escapes_double_dash():
+    assert profile.dual("<b>x</b>", "a--b") == "<!--osk-w--><b>x</b><!--osk-p:a-&#45;b-->"
+    assert profile.convert(profile.dual("<b>x</b>", "a--b")).count("a-&#45;b") == 1
+
+
+def test_profile_line_rows_are_thinned_out():
+    months = [(f"{2000 + i // 12}-{i % 12 + 1:02d}", float(i)) for i in range(120)]
+    assert profile.line_rows(months) == [(str(2000 + y), float(y * 12 + 11)) for y in range(10)]
+    many = [(str(i), float(i)) for i in range(100)]
+    rows = profile.line_rows(many)
+    assert len(rows) <= profile.MAX_LINE_ROWS + 1 and rows[-1] == ("99", 99.0)
+
+
+def test_chart_profile_twins_from_lua(boundaries):
+    out = _run("""
+        local rows = { { key = "Alpha", count = 3 }, { key = "Beta", count = 1 } }
+        local page = opensak.html.page{ title = "P",
+            opensak.chart.bar(rows), opensak.chart.map(rows),
+            opensak.chart.points({ { lat = 45, lon = 5 } }) }
+        local p = opensak.html.profile(page)
+        print(p:find("<svg", 1, true) == nil, select(2, p:gsub('bgcolor="#2a78d6"', "")),
+              p:find("Map of 1 places", 1, true) ~= nil)
+    """)
+    assert out == ["true\t4\ttrue"]
+
+
+def test_html_profile_errors_from_lua():
+    with pytest.raises(MacroError, match="expects the HTML of a page"):
+        _run("opensak.html.profile(42)")
+
+
+# ── find_statistics_extended.lua ─────────────────────────────────────────
+
+def test_find_statistics_extended_example(finds_db, boundaries):
+    _place_finds(finds_db)
+    host = OpenHost()
+    out = _run(_example("find_statistics_extended.lua"), host)
+    target = temp_dir() / "find_statistics_extended.html"
+    profile_file = temp_dir() / "find_statistics_extended_profile.html"
+    assert out == [f"4 finds → {target}",
+                   f"For your geocaching.com profile → {profile_file}",
+                   "Open it in a text editor, copy everything and paste it into the profile."]
+    assert host.opened == [target]
+    page = target.read_text(encoding="utf-8")
+    assert _tile(page, "finds") == "4"
+    assert _tile(page, "countries") == "2 / 2" and _tile(page, "states in Alpha") == "2 / 2"
+    _check_profile(profile_file.read_text(encoding="utf-8"))

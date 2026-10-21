@@ -8,9 +8,11 @@
 -- Known limitations:
 -- - This is a template macro: copy it and adapt the statistics, texts and
 --   layout to your needs. It is not a finished report.
--- - The page cannot be used on geocaching.com (e.g. pasted into your
---   profile): the profile editor only keeps very limited HTML and removes
---   the inline SVG charts, maps and the stylesheet.
+-- - The page itself cannot be pasted into your geocaching.com profile: the
+--   profile editor only keeps very limited HTML and removes the inline SVG
+--   charts, maps and the stylesheet. PROFILE_FILE is the version for the
+--   profile (opensak.html.profile): the charts become tables with coloured
+--   bars, the region maps lists of their regions, other maps a short note.
 -- - Maps use OpenSAK's boundary data (the outlines of Update location),
 --   which is not yet stable: outlines, names and the country of a state may
 --   still change. Without the boundary data the maps are a short note, and
@@ -43,6 +45,8 @@
 -- total, weekday, direction and distance from home, maps of your countries
 -- and states, difficulty × terrain and the milestones, then opens it in
 -- your browser.
+-- find_statistics_profile.html is the same page as text and tables only, to
+-- paste into your geocaching.com profile (see opensak.html.profile).
 --
 -- Everything is built from the generic opensak.stats.*, opensak.chart.*,
 -- opensak.geo.* and opensak.html.* functions — copy the macro and add your
@@ -55,6 +59,7 @@ local MILESTONE_STEP = nil    -- e.g. 500; nil = chosen from the number of finds
 local MAIN_TYPES = 4          -- cache types shown on their own in "finds per year"
 local FILE = opensak.temp_dir() .. "/find_statistics.html"
 local OPEN = true             -- open the page in the browser when done
+local PROFILE_FILE = opensak.temp_dir() .. "/find_statistics_profile.html"   -- nil = none
 
 local stats, chart, html, date = opensak.stats, opensak.chart, opensak.html, opensak.date
 
@@ -263,4 +268,10 @@ local page = html.page{
 
 local path = opensak.write_text(FILE, page)
 print(#finds .. " finds → " .. path)
+if PROFILE_FILE then
+    -- The same page as text and tables only, for a geocaching.com profile.
+    local profile_path = opensak.write_text(PROFILE_FILE, html.profile(page))
+    print("For your geocaching.com profile → " .. profile_path)
+    print("Open it in a text editor, copy everything and paste it into the profile.")
+end
 if OPEN then opensak.open(path) end

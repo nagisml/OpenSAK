@@ -14,6 +14,8 @@ import math
 from html import escape as _escape
 from typing import Any, Mapping, Optional, Sequence
 
+from opensak.stats import profile, vega
+
 # The accent colour (light, dark): links and the bars of html.table{ bars = }.
 ACCENT_COLORS = ("#2a78d6", "#3987e5")
 # Stacked series 2-8 of opensak.chart.* in the dark theme (the light steps
@@ -41,6 +43,7 @@ a { color: var(--accent); }
 .tile { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 .tile .value { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tile .label { color: var(--muted); font-size: 13px; }
+.vega-chart { margin: 8px 0; max-width: 100%%; overflow-x: auto; }
 .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 24px; }
 .table { overflow-x: auto; }
 table { border-collapse: collapse; font-variant-numeric: tabular-nums; margin-top: 8px; }
@@ -171,9 +174,10 @@ def table(
                 top = bar_max[field]
                 share = max(value, 0) / top if _is_number(value) and top > 0 else 0
                 out.append(
-                    f'<td style="width:{BAR_WIDTH}px;padding-left:0">'
-                    f'<span style="display:block;height:10px;width:{share * 100:.1f}%;'
-                    f'background:{bar_color};border-radius:0 3px 3px 0"></span></td>'
+                    f'<td style="width:{BAR_WIDTH}px;padding-left:0">' + profile.dual(
+                        f'<span style="display:block;height:10px;width:{share * 100:.1f}%;'
+                        f'background:{bar_color};border-radius:0 3px 3px 0"></span>',
+                        profile.table_bar(share, bar_color)) + "</td>"
                 )
         out.append("</tr>")
     out.append("</tbody></table></div>")
@@ -185,13 +189,15 @@ def tiles(items: Sequence[Mapping[str, Any]]) -> str:
     if not isinstance(items, (list, tuple)):
         raise HtmlError('tiles expects a list, e.g. { {label = "finds", value = 42} }')
     out = ['<div class="tiles">']
+    pairs = []
     for item in items:
         if not isinstance(item, Mapping):
             raise HtmlError("each tile is a table {label =, value =}")
-        out.append(f'<div class="tile"><div class="value">{escape(item.get("value"))}</div>'
-                   f'<div class="label">{escape(item.get("label"))}</div></div>')
+        pairs.append((escape(item.get("value")), escape(item.get("label"))))
+        out.append(f'<div class="tile"><div class="value">{pairs[-1][0]}</div>'
+                   f'<div class="label">{pairs[-1][1]}</div></div>')
     out.append("</div>")
-    return "".join(out)
+    return profile.dual("".join(out), profile.tiles(pairs))
 
 
 def _html_parts(parts: Any, what: str) -> list[str]:
@@ -205,9 +211,10 @@ def _html_parts(parts: Any, what: str) -> list[str]:
 def columns(parts: Sequence[str]) -> str:
     """Put the HTML *parts* side by side (one below the other on a narrow
     window)."""
-    return '<div class="columns">' + "".join(
-        f"<div>{p}</div>" for p in _html_parts(parts, "columns")
-    ) + "</div>"
+    # The comments mark the columns for profile.convert().
+    return '<div class="columns"><!--osk-cols-->' + "".join(
+        f"<div><!--osk-c-->{p}</div><!--/osk-c-->" for p in _html_parts(parts, "columns")
+    ) + "</div><!--/osk-cols-->"
 
 
 def page(
@@ -231,13 +238,18 @@ def page(
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{escape(title)}</title>",
         f"<style>\n{PAGE_CSS}{css or ''}\n</style></head><body>",
-        f"<h1>{escape(title)}</h1>",
+        # <!--osk-body--> … <!--/osk-body-->: the part profile.convert() keeps.
+        f"<!--osk-body--><h1>{escape(title)}</h1>",
     ]
     if subtitle:
         parts.append(f'<p class="sub">{escape(subtitle)}</p>')
     parts.extend(_html_parts(body, "body"))
     if footer:
         parts.append(f"<footer>{escape(footer)}</footer>")
+    parts.append("<!--/osk-body-->")
+    if vega.uses_vega("".join(parts)):
+        # Charts from opensak.chart.vega(): the Vega files once, inline.
+        parts.append(vega.page_scripts())
     parts.append("</body></html>")
     return "\n".join(parts)
 
@@ -249,6 +261,13 @@ def _rgba(color: str, alpha: float) -> str:
         c = "".join(ch * 2 for ch in c)
     r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
     return f"rgba({r},{g},{b},{alpha:.2f})"
+
+
+def profile_page(page_html: Any) -> str:
+    """The geocaching.com profile version of *page_html* (see profile.py)."""
+    if not isinstance(page_html, str):
+        raise HtmlError("profile expects the HTML of a page, e.g. from html.page")
+    return profile.convert(page_html)
 
 
 def matrix(

@@ -83,6 +83,9 @@ a = Analysis(
         ("src/opensak/assets/icons/cache_types", "opensak/assets/icons/cache_types"),
         ("src/opensak/assets/icons/cache_found", "opensak/assets/icons/cache_found"),
         ("src/opensak/assets/icon_guide.html",   "opensak/assets/icon_guide.html"),
+        # Vega-Lite JavaScript, put inline into macro reports that use
+        # opensak.chart.vega() (opensak.stats.vega).
+        ("src/opensak/assets/vega",              "opensak/assets/vega"),
         # Example Lua macros (+ their CSV), copied into the user's macros
         # folder by Macros → Open example (opensak.macro.examples).
         ("macros/examples",                       "macros/examples"),

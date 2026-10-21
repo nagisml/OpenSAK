@@ -191,7 +191,9 @@ from opensak.macro.sql import (
 from opensak.stats import charts
 from opensak.stats import html as report_html
 from opensak.stats import maps as report_maps
+from opensak.stats import profile as report_profile
 from opensak.stats import tables as stats_tables
+from opensak.stats import vega as report_vega
 from opensak.utils import flags
 from opensak.utils.constants import (
     ATTRIBUTES,
@@ -3057,7 +3059,9 @@ class MacroRuntime:
                 opts = {"names": names, **opts, "y": fields}
             # kind is one of CHART_KEYS: charts.bar, line, heatmap or rose.
             draw: Callable[..., str] = getattr(charts, kind)
-            return draw(rows, **opts)
+            svg = draw(rows, **opts)
+            # The table version for a geocaching.com profile (html.profile).
+            return report_profile.dual(svg, report_profile.chart(kind, rows, opts))
         except charts.ChartError as exc:
             raise MacroError(f"{func}: {exc}") from None
 
@@ -3073,10 +3077,10 @@ class MacroRuntime:
     @staticmethod
     def _no_map(title: Any) -> str:
         text = "Map not available: the boundary data is not installed."
-        return (f'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="40" role="img" '
+        return report_profile.dual(f'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="40" role="img" '
                 f'aria-label="{report_html.escape(title or text)}" style="max-width:100%">'
                 f'<text x="0" y="24" font-size="13" fill="currentColor">'
-                f'{report_html.escape(text)}</text></svg>')
+                f'{report_html.escape(text)}</text></svg>', report_profile.note(text))
 
     def _map_options(self, func: str, kind: str, options: Any) -> dict[str, Any]:
         opts = {} if options is None else _from_lua(options)
@@ -3106,7 +3110,11 @@ class MacroRuntime:
             return self._no_map(opts.get("title"))
         fields = self._fields(rows, (opts.get("key", "key"), opts.get("value", "count")))
         try:
-            return report_maps.choropleth(data, fields, **opts)
+            return report_profile.dual(
+                report_maps.choropleth(data, fields, **opts),
+                report_profile.regions(fields, opts.get("key", "key"), opts.get("value", "count"),
+                                       opts.get("color") or charts.DEFAULT_COLOR,
+                                       opts.get("title")))
         except charts.ChartError as exc:
             raise MacroError(f"{func}: {exc}") from None
 
@@ -3120,7 +3128,10 @@ class MacroRuntime:
         fields = self._fields(rows, (opts.get("lat", "lat"), opts.get("lon", "lon"),
                                      opts.get("label")))
         try:
-            return report_maps.points(data, fields, **opts)
+            return report_profile.dual(
+                report_maps.points(data, fields, **opts),
+                report_profile.note(f"Map of {len(fields)} places: a geocaching.com profile "
+                                    "cannot show maps without an image hosted elsewhere."))
         except charts.ChartError as exc:
             raise MacroError(f"{func}: {exc}") from None
 
@@ -3162,6 +3173,32 @@ class MacroRuntime:
         except charts.ChartError as exc:
             raise MacroError(f"{func}: {exc}") from None
         return lua.table_from(found, recursive=True), lua.table_from(unmatched)
+
+    def _chart_vega(self, spec=None, options=None) -> str:
+        func = "opensak.chart.vega"
+        if not _is_lua_table(spec):
+            raise MacroError(
+                f'{func} expects a Vega-Lite spec as a table, e.g. '
+                f'{{ data = {{ values = rows }}, mark = "bar", encoding = {{ ... }} }}'
+            )
+        opts = {} if options is None else _from_lua(options)
+        if opts == []:
+            opts = {}
+        if not isinstance(opts, dict) or set(opts) - {"actions"}:
+            raise MacroError(f"{func}: options must be a table, e.g. {{ actions = false }}")
+        actions = opts.get("actions", True)
+        if not isinstance(actions, bool):
+            raise MacroError(f"{func}: actions must be true or false, got {actions!r}")
+        data = _from_lua(spec)
+        if data == []:
+            data = {}
+        try:
+            return report_profile.dual(
+                report_vega.snippet(data, actions=actions),
+                report_profile.note("Interactive chart: not possible on a geocaching.com profile "
+                                    "(no JavaScript)."))
+        except report_vega.VegaError as exc:
+            raise MacroError(f"{func}: {exc}") from None
 
     def _geo_outlines(self, lua, layer="country", options=None):
         func = "opensak.geo.outlines"
@@ -3449,6 +3486,14 @@ class MacroRuntime:
             "size": 0 if is_dir else st.st_size,
             "modified": int(st.st_mtime),
         })
+
+    def _html_profile(self, page=None) -> str:
+        func = "opensak.html.profile"
+        if isinstance(page, bytes):
+            page = page.decode("utf-8", errors="replace")
+        if not isinstance(page, str):
+            raise MacroError(f"{func} expects the HTML of a page, e.g. from opensak.html.page")
+        return self._report_call(func, report_html.profile_page, page)
 
     def _choose_file(self, title=None, file_filter=None, mode=None) -> Optional[str]:
         for name, value in (("title", title), ("filter", file_filter)):
@@ -6826,7 +6871,9 @@ API: tuple[ApiFunction, ...] = (
         name="geo.outlines",
         description="The outlines of countries, states or counties (`layer`) "
                     "as a GeoJSON FeatureCollection (a table), e.g. for a "
-                    "map drawn by the macro itself or for another program. "
+                    "map with opensak.chart.vega (mark \"geoshape\"): `data = "
+                    "{ values = outlines, format = { type = \"json\", property "
+                    "= \"features\" } }`. "
                     "Like opensak.chart.map, `rows` puts the "
                     "value (field `value`, default \"count\") of each row into "
                     "the properties of the region its field `key` (default "
@@ -6857,6 +6904,44 @@ API: tuple[ApiFunction, ...] = (
                   "lon?: string, box?: number[], detail?: number}", "See above.", optional=True),
         ),
         returns=("table?, string[]?", "The FeatureCollection and the names without a region."),
+    ),
+    ApiFunction(
+        name="chart.vega",
+        description="An interactive chart from a Vega-Lite spec "
+                    "(https://vega.github.io/vega-lite/), as HTML for "
+                    "opensak.html.page: the spec is a table, written like the "
+                    "JSON of the Vega-Lite examples (`[\"$schema\"]` is added). "
+                    "Put the rows into `data = { values = rows }`; Vega-Lite "
+                    "can then count, bin, filter and aggregate them itself "
+                    "(`aggregate`, `timeUnit`, `transform`), and charts can be "
+                    "linked (`params` with `select`, `vconcat`/`hconcat` "
+                    "sharing one `data`). html.page puts the Vega files (about "
+                    "0.8 MB) inline once, so the page works offline; the colours "
+                    "follow its light/dark theme. The chart's ⋯ menu saves it as "
+                    "SVG or PNG (`actions = false` hides it). Needs JavaScript, "
+                    "so it does not work in a geocaching.com profile — use the "
+                    "other opensak.chart.* functions there. Lua tables that "
+                    "should be JSON lists must not be empty (leave the key out "
+                    "instead).",
+        example='local svg = opensak.chart.vega{\n'
+                '  title = "Finds per year and type",\n'
+                '  data = { values = finds },          -- e.g. rows from opensak.caches{}\n'
+                '  mark = "bar",\n'
+                '  encoding = {\n'
+                '    x = { field = "found_date", timeUnit = "utcyear", type = "ordinal", title = "Year" },\n'
+                '    y = { aggregate = "count", type = "quantitative", title = "Finds" },\n'
+                '    color = { field = "type", type = "nominal", title = "Type" },\n'
+                '    tooltip = { { field = "type" }, { aggregate = "count", title = "Finds" } },\n'
+                '  },\n'
+                '}',
+        since=3,
+        bind=lambda rt, lua: rt._chart_vega,
+        params=(
+            Param("spec", "table", "The Vega-Lite spec."),
+            Param("options", "{actions?: boolean}", "`actions`: show the ⋯ menu (default true).",
+                  optional=True),
+        ),
+        returns=("string", "HTML for opensak.html.page."),
     ),
     ApiFunction(
         name="geo.regions",
@@ -7178,6 +7263,28 @@ API: tuple[ApiFunction, ...] = (
     ),
 
     # -- opensak.date ---------------------------------------------------------
+    ApiFunction(
+        name="html.profile",
+        description="The geocaching.com profile version of a page from "
+                    "opensak.html.page: one `<div>` to paste into the profile. "
+                    "A profile keeps only text and tables with inline styles "
+                    "(no stylesheet, classes, JavaScript, SVG or data: "
+                    "images), so the chart.* charts become tables with "
+                    "coloured bars, a region map becomes a list of its "
+                    "regions, a line chart shows at most "
+                    f"{report_profile.MAX_LINE_ROWS} points (the last of each "
+                    "year for monthly keys), and point maps and Vega charts "
+                    "become a short note. HTML you wrote yourself is kept, "
+                    "without `<script>`, `<style>`, `<svg>`, data: images and "
+                    "classes.",
+        example='local page = opensak.html.page{ title = "Find statistics", ... }\n'
+                'opensak.write_text(opensak.temp_dir() .. "/stats.html", page)\n'
+                'opensak.write_text(opensak.temp_dir() .. "/stats_profile.html", opensak.html.profile(page))',
+        since=3,
+        bind=lambda rt, lua: rt._html_profile,
+        params=(Param("page", "string", "The page, from opensak.html.page."),),
+        returns=("string", "HTML for the geocaching.com profile."),
+    ),
     ApiFunction(
         name="date.parse",
         description="Parse a date into seconds since the epoch, the same kind "
