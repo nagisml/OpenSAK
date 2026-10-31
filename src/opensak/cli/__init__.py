@@ -269,18 +269,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     """Run the headless command in *argv*; returns the exit code."""
-    from opensak.utils.run_macro import EXIT_INTERRUPTED, EXIT_USAGE, open_stdio
+    from opensak.utils.run_macro import EXIT_INTERRUPTED, open_stdio
 
     out, err = open_stdio()
     try:
         args = parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 0
-    if args.command not in ("import", "run"):
-        # Until `opensak export` and `db` are written (#1203).
-        err.write(f"opensak: {args.command} is not implemented yet\n")
-        return EXIT_USAGE
     try:
+        if args.command == "export":
+            from opensak.cli.export_cmd import run_export
+            return run_export(args, out, err)
+        if args.command == "db":
+            from opensak.cli.db_cmd import run_db
+            return run_db(args, out, err)
         if args.command == "run":
             from opensak.cli.run_cmd import run_macro
             return run_macro(args, out, err)
