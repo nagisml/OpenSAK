@@ -1715,6 +1715,15 @@ class MacroRuntime:
                 self._stop("macro cancelled")
             raise MacroError("macro cancelled")
 
+    def stop_run(self, code: int, message: str) -> None:
+        """End the running macro with exit code *code*, as opensak.exit()
+        does, so pcall cannot catch it. For a host that can't go on
+        (`opensak run`, #1203); call it while the macro is running."""
+        self._exit_code = code
+        if self._stop is not None:
+            self._stop(message)
+        raise MacroError(message)
+
     # -- API functions exposed to Lua -----------------------------------------
 
     def _filter(self, spec=None) -> int:
@@ -1811,6 +1820,9 @@ class MacroRuntime:
             return
         macro = self._macro_path
         if self._write_approved():
+            return
+        # `opensak run --allow-write`: for this run only, nothing is stored.
+        if getattr(self._host, "allow_write", False):
             return
         if macro not in self._write_denied and self._reconfirm(lambda r: r.write) is not False:
             if self._write_approved():
@@ -4758,6 +4770,7 @@ class MacroRuntime:
             stored = self._load_form_memory(memory).get(key)
             if isinstance(stored, dict):
                 restored = macro_forms.apply_remembered(form, stored, func)
+                form.remembered = {f.id for f in restored if f.id}
 
         session = _FormSession(self, lua, form, restored)
         result = show(form, session.dispatch)
