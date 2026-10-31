@@ -11,14 +11,18 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from opensak import cli
+from opensak.db.database import init_db, session_for
 from opensak.db.lock import DatabaseLock
 from opensak.db.manager import get_db_manager
-from opensak.macro import WriteApproval, db_access
+from opensak.db.models import Cache
+from opensak.macro import MacroHost, MacroRuntime, WriteApproval, db_access
 from opensak.macro.db_access import source_hash
+from opensak.macro.headless import HeadlessHost
 from opensak.settings_store import get_store
 from opensak.utils.run_macro import (
     EXIT_DB_LOCKED, EXIT_DB_NOT_FOUND, EXIT_MACRO_ERROR, EXIT_NEEDS_UI, EXIT_OK, EXIT_USAGE,
@@ -300,6 +304,78 @@ def test_a_called_macro_sees_the_same_args(capsys, tmp_path, nightly):
     code, out, _ = _run(capsys, "run", macro, "--arg", "a=1", "--allow-folder", tmp_path)
     assert (code, out) == (EXIT_OK, "true\t1\n")
 
+
+# ── The example delete_archived.lua ──────────────────────────────────────────
+
+EXAMPLE = Path(__file__).parents[2] / "macros" / "examples" / "delete_archived.lua"
+
+
+@pytest.fixture
+def archived(nightly):
+    """Nightly with an archived cache to delete, and others to keep."""
+    conn = sqlite3.connect(nightly.path)
+    conn.execute("DELETE FROM caches")
+    conn.commit()
+    conn.close()
+    with session_for(nightly.path) as s:
+        for code, values in {
+            "GCDEL1": {"archived": True},
+            "GCKEEPF": {"archived": True, "found": True},
+            "GCKEEPO": {"archived": True, "is_owner": True},
+            "GCKEEPL": {"archived": True, "locked": True},
+            "GCKEEPA": {"archived": False},
+        }.items():
+            s.add(Cache(gc_code=code, name=code, cache_type="Traditional Cache",
+                        latitude=47.0, longitude=8.0, **values))
+    return nightly
+
+
+def test_example_deletes_only_unfound_archived_caches(capsys, archived):
+    code, out, _ = _run(capsys, "run", EXAMPLE, "--db", "Nightly", "--allow-write")
+    assert code == EXIT_OK and "1 archived caches deleted" in out
+    assert _codes(archived) == ["GCKEEPA", "GCKEEPF", "GCKEEPL", "GCKEEPO"]
+
+
+def test_example_dry_run_deletes_nothing(capsys, archived):
+    before = _codes(archived)
+    code, out, _ = _run(capsys, "run", EXAMPLE, "--db", "Nightly", "--allow-write",
+                        "--arg", "dry_run=yes")
+    assert code == EXIT_OK
+    assert "GCDEL1" in out and "1 archived caches would be deleted" in out
+    assert _codes(archived) == before
+
+
+def test_example_without_approval_deletes_nothing(capsys, archived):
+    before = _codes(archived)
+    code, _, err = _run(capsys, "run", EXAMPLE, "--db", "Nightly")
+    assert code == EXIT_NEEDS_UI and "--allow-write" in err
+    assert _codes(archived) == before
+
+
+def test_example_with_nothing_to_delete(capsys, archived):
+    assert _run(capsys, "run", EXAMPLE, "--db", "Nightly", "--allow-write")[0] == EXIT_OK
+    code, out, _ = _run(capsys, "run", EXAMPLE, "--db", "Nightly", "--allow-write")
+    assert code == EXIT_OK and "No archived caches to delete" in out
+
+
+def test_example_asks_first_in_opensak(archived):
+    # Not headless: a No keeps the caches.
+    init_db(db_path=archived.path)
+    lines: list[str] = []
+    host = HeadlessHost(answers={"Delete 1 archived caches?": "no"}, allow_write=True,
+                        output=lines.append, status=lines.append)
+    runtime = MacroRuntime(cast(MacroHost, host), output=lines.append)
+    before = _codes(archived)
+    source = EXAMPLE.read_text(encoding="utf-8")
+    try:
+        assert runtime.run(source, macro_path=EXAMPLE) == 0
+    finally:
+        init_db(db_path=get_db_manager().active_path)
+    assert lines == ["Nothing deleted"]
+    assert _codes(archived) == before
+
+
+# ── Without a window ─────────────────────────────────────────────────────────
 
 def test_runs_without_a_display_or_the_gui(tmp_path, nightly):
     # A real process: nothing on the way may pull in QtWidgets or the main

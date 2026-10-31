@@ -723,6 +723,61 @@ def _changing_section() -> list[str]:
     return lines + _children_section()
 
 
+def _headless_section() -> list[str]:
+    return [
+        "",
+        "## Running without a window",
+        "",
+        "`opensak run <macro.lua> --db NAME` runs a macro with no window and no "
+        "display, e.g. from a scheduler. `opensak run --help` lists the options; "
+        "the User Guide has examples for each operating system. "
+        "`opensak.is_headless()` tells a macro it runs this way, `opensak.args` "
+        "holds the `--arg key=value` pairs, and the header `Headless: no` makes "
+        "`opensak run` refuse the macro.",
+        "",
+        "Nothing ever waits for an answer. What a macro asks is answered from the "
+        "command line, otherwise the run stops with exit code 7, which `pcall` "
+        "can't catch:",
+        "",
+        "| Function | Without a window |",
+        "|---|---|",
+        "| `filter`, `sort`, `count`, ... | The filter is kept in memory and evaluated "
+        "against the database. |",
+        "| `current`, `selected` | `nil`, and an empty list. |",
+        "| `select` | Returns `false`. |",
+        "| `print`, `message`, `log` | Written to stdout, the log file and `--log-file`. |",
+        "| `progress` | Written to stderr, the log file and `--log-file`. |",
+        "| `confirm` | `--arg` with the message as key (`yes` or `no`), else yes with `--yes`. |",
+        "| `input` | `--arg` with the prompt as key, else the default with `--yes`. |",
+        "| `choose` | `--arg` with the prompt as key, else the default with `--yes`, if "
+        "there is one. |",
+        "| `form` | `--arg` with the field id as key, then the values remembered with "
+        "`remember = true`, then the defaults with `--yes`. It closes as with its "
+        "default button. |",
+        "| `choose_file`, `choose_folder` | Only `--arg` with the title as key. |",
+        "| `open`, `refresh` | Do nothing. A file the macro didn't write needs `--yes`, "
+        "as `open` asks about it first. |",
+        "| `set_center` | Not available: an error. |",
+        "| `run_macro` | The called macro runs under the same rules. |",
+        "| `switch_database`, `attach`, `copy_caches`, `move_caches`, the targets an import names | Take the "
+        "database's lock until the run ends; a database in use stops the run with "
+        "exit code 6. `switch_database` lasts for this run only. |",
+        "",
+        "**Writes** need an \"Always\" approval for the macro's current code, or "
+        "`--allow-write`, which stores nothing. A macro edited since its approval "
+        "counts as not approved. Otherwise its first write stops the run with exit "
+        "code 7, and that write isn't made.",
+        "",
+        "**Folders** need to be approved for the macro's current code, listed in "
+        "Settings, or given with `--allow-folder DIR`, for this run only. Otherwise "
+        "the run stops with exit code 7. OpenSAK's own data is never available.",
+        "",
+        "**Web sites** follow the same rule as in OpenSAK, but a site that isn't "
+        "approved yet fails, as nobody can be asked. The declaration of `Permissions` "
+        "and `Network` isn't shown.",
+    ]
+
+
 def _web_section() -> list[str]:
     blocked = _blocked_domains()
     return [
@@ -1023,6 +1078,7 @@ def render_api_markdown(examples_dir: Path = EXAMPLES_DIR) -> str:
     lines += _schema_section()
     lines += _changing_section()
     lines += _web_section()
+    lines += _headless_section()
     lines += _examples_section(examples_dir)
     lines += _header_section()
     lines += _editor_section()
