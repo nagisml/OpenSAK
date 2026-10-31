@@ -186,7 +186,8 @@ def build_parser() -> argparse.ArgumentParser:
         "run", parents=[wait, output], help="run a Lua macro without a window",
         description="Run a Lua macro without a window. A macro that needs a "
                     "dialog nobody can answer stops with exit code 7.")
-    run.add_argument("macro", metavar="MACRO", help="the macro's .lua file")
+    run.add_argument("macro", metavar="MACRO", help="the macro's .lua file, or the file name or Name of a macro in "
+                          "the macros folder")
     run.add_argument("--db", metavar="NAME|PATH",
                      help=f"the OpenSAK database to run it on: {db_help} "
                           "(default: the active database)")
@@ -275,12 +276,15 @@ def main(argv: list[str]) -> int:
         args = parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 0
-    if args.command != "import":
-        # Until `opensak run`, `export` and `db` are written (#1203).
+    if args.command not in ("import", "run"):
+        # Until `opensak export` and `db` are written (#1203).
         err.write(f"opensak: {args.command} is not implemented yet\n")
         return EXIT_USAGE
-    from opensak.cli.import_cmd import run_import
     try:
+        if args.command == "run":
+            from opensak.cli.run_cmd import run_macro
+            return run_macro(args, out, err)
+        from opensak.cli.import_cmd import run_import
         return run_import(args, out, err)
     except KeyboardInterrupt:
         err.write("opensak: interrupted\n")

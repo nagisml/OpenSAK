@@ -2223,6 +2223,7 @@ class MacroRuntime:
     def _attach(self, name=None, schema=None) -> str:
         func = "opensak.attach"
         db = self._require_database(name, func)
+        self._lock_database(db)
         if schema is None:
             schema = default_schema_name(db.name)
         elif not isinstance(schema, str):
@@ -2752,6 +2753,14 @@ class MacroRuntime:
     def _find_database(name: str) -> Optional[DatabaseInfo]:
         return next((db for db in get_db_manager().databases if db.name == name), None)
 
+    def _lock_database(self, db: DatabaseInfo) -> None:
+        """Before using a database other than the active one: `opensak run`
+        (#1203) holds its lock, as it does the active one's. Without a host
+        function for it (the GUI) nothing happens."""
+        lock = getattr(self._host, "lock_database", None)
+        if lock is not None and db.path != get_db_manager().active_path:
+            lock(db)
+
     def _require_database(self, name: Any, func: str) -> DatabaseInfo:
         db = self._find_database(_db_name(name, func))
         if db is None:
@@ -2876,6 +2885,7 @@ class MacroRuntime:
             raise MacroError(f"{func}: {db.name!r} is the active database")
         if not db.exists:
             raise MacroError(f"{func}: the file of database {db.name!r} is missing: {db.path}")
+        self._lock_database(db)
         if options is not None and not hasattr(options, "items"):
             raise MacroError(f'{func}: options must be a table, e.g. {{ if_exists = "skip" }}')
         opts = dict(options.items()) if options is not None else {}
@@ -2917,6 +2927,12 @@ class MacroRuntime:
         quiet = bool(opts.pop("quiet", False))
         settings = service.GsakImportOptions(**opts)
         self._require_write(func)
+        # The targets it names; one named after a GSAK database found in the
+        # source is only known to the importer.
+        for name in {settings.target, *settings.targets.values(), *(settings.databases or [])}:
+            target = self._find_database(name) if name else None
+            if target is not None:
+                self._lock_database(target)
 
         # %APPDATA%\gsak, $HOME/... — as the folder permissions expand them.
         path = expand_path(source.strip())
@@ -3014,6 +3030,7 @@ class MacroRuntime:
         if not db.exists:
             raise MacroError(f"{func}: the file of database {db.name!r} is missing: {db.path}")
         self._require_write(func)
+        self._lock_database(db)
 
         # The files to import, each once. Files and folders of a setting
         # that were moved or deleted since are left out, as in the dialog,

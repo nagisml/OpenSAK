@@ -112,8 +112,9 @@ class HeadlessHost:
 
     *answers* are the --arg values, *yes* is --yes, *allow_write* is
     --allow-write. *output* gets message() texts, *status* the progress
-    lines. *switch* makes another database active, taking its lock (raises
-    if it can't); without it opensak.switch_database() fails. Call
+    lines. *switch* makes another database active and *lock* takes the lock
+    of one the macro uses besides the active one (both may call the stop
+    function); without *switch* opensak.switch_database() fails. Call
     set_stop() with the runtime's stop_run before the run.
     """
 
@@ -125,6 +126,7 @@ class HeadlessHost:
         output: Callable[[str], None] = print,
         status: Callable[[str], None] = print,
         switch: Optional[Callable[[str], None]] = None,
+        lock: Optional[Callable[[Any], None]] = None,
     ):
         self._answers = answers or {}
         self._yes = yes
@@ -133,6 +135,7 @@ class HeadlessHost:
         self._output = output
         self._status = status
         self._switch = switch
+        self._lock = lock
         self._stop_run: Optional[Callable[[int, str], None]] = None
         self._filterset = FilterSet()
         self._filter_label = ""
@@ -202,6 +205,10 @@ class HeadlessHost:
             raise RuntimeError("not available in this run")
         self._switch(name)
         self.clear_filter()
+
+    def lock_database(self, db: Any) -> None:
+        if self._lock is not None:
+            self._lock(db)
 
     def set_corrected_coords(
         self, gc_code: str, lat: Optional[float], lon: Optional[float]
