@@ -272,7 +272,8 @@ def _run_on_database(args: argparse.Namespace, out: TextIO, output: _Output,
     )
     # cast: the optional MacroHost functions are left out on purpose
     runtime = MacroRuntime(cast(MacroHost, host), output=output.line,
-                           folder_permissions=permissions)
+                           folder_permissions=permissions, headless=True,
+                           macro_args=args.macro_args)
     host.set_stop(stop)
     try:
         code = runtime.run(source, chunk_name=path.name, base_dir=path.parent, macro_path=path)

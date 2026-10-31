@@ -1582,6 +1582,8 @@ class MacroRuntime:
         folder_permissions: Optional[list[FolderPermission]] = None,
         settings_dir: Optional[Path] = None,
         external_editor: bool = False,
+        headless: bool = False,
+        macro_args: Optional[dict[str, str]] = None,
     ):
         """*folder_permissions* limits which folders file functions may
         touch; None means the list saved in Settings, read at every run so
@@ -1591,6 +1593,8 @@ class MacroRuntime:
         None means the settings/ folder of the macros folder.
         *external_editor*: the macros come from an external editor
         (`opensak --run-macro`), so "while I edit it" may approve them.
+        *headless*: a run of `opensak run` (opensak.is_headless()), with
+        *macro_args* from its --arg (opensak.args).
 
         print() goes to *output*; opensak.log() to *log* (default: *output*)
         and to OpenSAK's log file."""
@@ -1605,6 +1609,8 @@ class MacroRuntime:
         self._memory_limit = memory_limit
         self._folder_permissions = folder_permissions
         self._settings_dir = settings_dir
+        self._headless = headless
+        self._macro_args = dict(macro_args or {})
         self._base_dir: Optional[Path] = None
         # The running macro's file — switched by opensak.run_macro() so that
         # per-macro state (saved settings, #983) belongs to the called macro,
@@ -5107,6 +5113,9 @@ class MacroRuntime:
             for ns in namespaces:
                 table = table.setdefault(ns, {})
             bound = func.bind(self, lua)
+            if func.value:
+                table[name] = bound
+                continue
             # A Lua function (opensak.transaction) must not be called through
             # Python: errors passing through lose their value.
             if lua_type(bound) == "function":
@@ -5484,7 +5493,7 @@ class _FormSession:
 
 # Raised whenever functions are added or changed in a released build, so
 # macros can check opensak.api_version() before using newer functions.
-API_VERSION = 4
+API_VERSION = 5
 
 # API version → the stable release it first shipped in. Within an API
 # version the API only grows; renaming or removing anything needs a new
@@ -5542,6 +5551,9 @@ class ApiFunction:
     # Contacts web sites: only registered with the lua-macro-net feature
     # flag (beta builds), see utils/flags.py.
     net: bool = False
+    # Not a function: *bind* gives the value of opensak.<name> (opensak.args)
+    # and *returns* its type and description.
+    value: bool = False
     # (API version, what to use instead) once the function is deprecated;
     # it is removed no earlier than one stable release later (API_STABLE),
     # and then goes to REMOVED. Its first call in a run prints a warning.
@@ -5561,6 +5573,8 @@ class ApiFunction:
     @property
     def signatures(self) -> list[str]:
         """E.g. ["opensak.read_csv(path [, sep])"]."""
+        if self.value:
+            return [f"opensak.{self.name}"]
         result = []
         for params in (self.params, *self.overloads):
             text = ""
@@ -7369,6 +7383,28 @@ API: tuple[ApiFunction, ...] = (
             Param("...", "any", "Passed to the macro as `...`."),
         ),
         returns=("any...", "What the macro returns."),
+    ),
+    ApiFunction(
+        name="is_headless",
+        description="Whether the macro runs without a window, under `opensak run`, "
+                    "so it can skip its dialogs. False in OpenSAK and with "
+                    "`opensak --run-macro`.",
+        example='local name = opensak.is_headless() and opensak.args.name\n'
+                '    or opensak.input("Name?")',
+        since=5,
+        bind=lambda rt, lua: lambda: rt._headless,
+        returns=("boolean", "True under `opensak run`."),
+    ),
+    ApiFunction(
+        name="args",
+        description="The `--arg key=value` pairs of `opensak run`, with the values "
+                    "as strings. Empty in OpenSAK and with `opensak --run-macro`. "
+                    "A table, not a function.",
+        example='local days = tonumber(opensak.args.days) or 30',
+        since=5,
+        bind=lambda rt, lua: lua.table_from(rt._macro_args),
+        returns=("table<string, string>", "The values by key."),
+        value=True,
     ),
     ApiFunction(
         name="sleep",

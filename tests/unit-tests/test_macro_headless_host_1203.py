@@ -18,6 +18,7 @@ from opensak.db.models import Cache
 from opensak.macro import MacroError, MacroHost, MacroRuntime, WriteApproval, db_access
 from opensak.macro.db_access import source_hash
 from opensak.macro.headless import HeadlessHost
+from opensak.macro.metadata import parse_header
 from opensak.utils.run_macro import EXIT_NEEDS_UI, EXIT_USAGE
 
 WRITE = 'opensak.update("GCH1", { user_sort = 5 })\n'
@@ -294,6 +295,25 @@ def test_an_unapproved_folder_stops(tmp_path):
     assert run.code == EXIT_NEEDS_UI
     assert run.lines == []
     assert not (tmp_path / "x.txt").exists()
+
+
+# ── Outside `opensak run` ───────────────────────────────────────────────────
+
+def test_not_headless_and_no_args_by_default():
+    lines: list[str] = []
+    host = HeadlessHost(output=lines.append, status=lines.append)
+    runtime = MacroRuntime(cast(MacroHost, host), output=lines.append)
+    assert runtime.run('print(opensak.is_headless(), next(opensak.args))\n') == 0
+    assert lines == ["false\tnil"]
+
+
+@pytest.mark.parametrize("header, expected", [
+    ("", True), ("-- Headless: yes\n", True), ("-- headless: NO\n", False),
+    ("-- Headless: maybe\n", True),
+])
+def test_headless_header(header, expected):
+    info = parse_header(header + "print(1)\n", Path("m.lua"))
+    assert info.runs_headless is expected
 
 
 # ── Without a window ─────────────────────────────────────────────────────────

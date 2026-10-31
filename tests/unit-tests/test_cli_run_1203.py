@@ -287,6 +287,20 @@ def test_args_are_answers(capsys, tmp_path, nightly):
     assert _run(capsys, "run", macro, "--arg", "Name?=given")[:2] == (EXIT_OK, "given\n")
 
 
+def test_is_headless_and_args(capsys, tmp_path, nightly):
+    macro = _macro(tmp_path, 'print(opensak.is_headless(), opensak.args.a, opensak.args.b, '
+                             'opensak.args.none)\n')
+    code, out, _ = _run(capsys, "run", macro, "--arg", "a=1", "--arg", "b=x=y")
+    assert (code, out) == (EXIT_OK, "true\t1\tx=y\tnil\n")
+
+
+def test_a_called_macro_sees_the_same_args(capsys, tmp_path, nightly):
+    _macro(tmp_path, 'print(opensak.is_headless(), opensak.args.a)\n', "inner.lua")
+    macro = _macro(tmp_path, 'opensak.run_macro("inner.lua")\n')
+    code, out, _ = _run(capsys, "run", macro, "--arg", "a=1", "--allow-folder", tmp_path)
+    assert (code, out) == (EXIT_OK, "true\t1\n")
+
+
 def test_runs_without_a_display_or_the_gui(tmp_path, nightly):
     # A real process: nothing on the way may pull in QtWidgets or the main
     # window. Its empty profile has no list, so --db is a path outside one.

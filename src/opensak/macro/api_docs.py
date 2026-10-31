@@ -170,6 +170,11 @@ def _header_section() -> list[str]:
         "`opensak.api_version()` the macro works with: the manager marks a "
         "macro that needs a newer one and asks before running it. Only the "
         "comment lines before the first line of code are read.",
+        "",
+        "`Headless: no` says the macro can't run without a window: `opensak run` "
+        "refuses it before it starts, with exit code 7. Without the key, or with "
+        "any other value, it counts as `yes`. A macro that can do without its "
+        "dialogs can check `opensak.is_headless()`.",
         *_deprecated_keys_section(),
         "",
         "From the manager, **Shortcut…** gives a macro a key (with Ctrl or Alt, "
@@ -957,7 +962,8 @@ def render_api_markdown(examples_dir: Path = EXAMPLES_DIR) -> str:
             lines += [_param_line(p) for p in params.values()]
             lines.append("")
         if func.returns:
-            lines += [f"Returns `{func.returns[0]}` — {func.returns[1]}", ""]
+            word = "Type" if func.value else "Returns"
+            lines += [f"{word} `{func.returns[0]}` — {func.returns[1]}", ""]
         lines += [_since(func), ""]
         beta = _beta_note(func)
         if beta:
@@ -1360,6 +1366,9 @@ def render_lua_stub() -> str:
         if func.deprecated:
             # Calls are shown struck through, with the hint
             lines.append(f"---@deprecated Use {func.deprecated[1]}")
+        if func.value and func.returns:
+            lines += [f"---@type {func.returns[0]}", f"opensak.{func.name} = {{}}"]
+            continue
         for p in func.params:
             lines.append(f"---@param {p.name}{'?' if p.optional else ''} {p.type} "
                          f"{_deprecated_comment(p.deprecated)}{p.description}")
@@ -1387,7 +1396,7 @@ def _editor_words() -> dict[str, ApiFunction | LuaFunction | None]:
         namespace = func.name.rpartition(".")[0]
         if namespace:
             words.setdefault(f"opensak.{namespace}", None)
-        words[f"opensak.{func.name}"] = func
+        words[f"opensak.{func.name}"] = None if func.value else func
     return words
 
 
