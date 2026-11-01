@@ -134,6 +134,7 @@ from opensak.importer.gpx_import_settings import (
 from opensak.hint_detect import rot13
 from opensak.macro import forms as macro_forms
 from opensak.macro import helpers
+from opensak.macro import json_codec
 from opensak.macro import settings as macro_settings
 from opensak.macro.errors import MacroError
 from opensak.db.database import get_session, optimize_database
@@ -231,6 +232,8 @@ DEFAULT_MEMORY_LIMIT = 256 * 1024 * 1024
 MAX_CHOOSE_FILE_TEXT = 200
 # opensak.message() / input() / choose() texts
 MAX_UI_TEXT = 100_000
+# opensak.set_clipboard() / get_clipboard(): longest text
+MAX_CLIPBOARD_TEXT = 10_000_000
 # A form image (file or base64 data)
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # Where opensak.form{ remember = true } keeps the last values: a folder of
@@ -288,6 +291,8 @@ OPEN_SUFFIXES = (".html", ".htm", ".svg", ".txt", ".csv", ".tsv", ".md", ".json"
                  ".gpx", ".kml", ".pdf")
 MAX_OPENS_PER_RUN = 5
 # opensak.get_url(): the keys of its options table (Lua name → Python name)
+JSON_ENCODE_OPTIONS = {"null": "null", "empty": "empty", "indent": "indent"}
+JSON_DECODE_OPTIONS = {"null": "null"}
 GET_URL_OPTIONS = {"timeout": "timeout", "caption": "caption", "binary": "binary",
                    "max_bytes": "max_bytes"}
 
@@ -940,6 +945,12 @@ class MacroHost(Protocol):
         """Let the user pick a folder in OpenSAK's folder dialog; None if
         cancelled."""
 
+    def set_clipboard(self, text: str) -> None:
+        """Put *text* on the system clipboard."""
+
+    def get_clipboard(self) -> str:
+        """The text on the system clipboard, "" if it holds no text."""
+
     def show_form(
         self, form: macro_forms.Form, events: macro_forms.FormEvents
     ) -> Optional[tuple[dict[str, Any], str]]:
@@ -1544,6 +1555,15 @@ def _to_lua(lua, value: Any) -> Any:
     return value
 
 
+def _lua_describe(lua) -> Any:
+    """The *describe* function of settings.to_json(): type() and a table's
+    address, captured before the macro could replace them: lupa gives no
+    stable Python identity for tables."""
+    return lua.eval('(function(type, fmt) return function(v) local t = type(v) '
+                    'if t == "table" then return t, fmt("%p", v) end return t end '
+                    'end)(type, string.format)')
+
+
 def _ui_text(func: str, name: str, value: Any, optional: bool = False) -> str:
     """A text argument of a UI function; numbers are accepted, nil only
     when *optional* (→ "")."""
@@ -1582,6 +1602,8 @@ class MacroRuntime:
         folder_permissions: Optional[list[FolderPermission]] = None,
         settings_dir: Optional[Path] = None,
         external_editor: bool = False,
+        headless: bool = False,
+        macro_args: Optional[dict[str, str]] = None,
     ):
         """*folder_permissions* limits which folders file functions may
         touch; None means the list saved in Settings, read at every run so
@@ -1591,6 +1613,8 @@ class MacroRuntime:
         None means the settings/ folder of the macros folder.
         *external_editor*: the macros come from an external editor
         (`opensak --run-macro`), so "while I edit it" may approve them.
+        *headless*: a run of `opensak run` (opensak.is_headless()), with
+        *macro_args* from its --arg (opensak.args).
 
         print() goes to *output*; opensak.log() to *log* (default: *output*)
         and to OpenSAK's log file."""
@@ -1605,6 +1629,8 @@ class MacroRuntime:
         self._memory_limit = memory_limit
         self._folder_permissions = folder_permissions
         self._settings_dir = settings_dir
+        self._headless = headless
+        self._macro_args = dict(macro_args or {})
         self._base_dir: Optional[Path] = None
         # The running macro's file — switched by opensak.run_macro() so that
         # per-macro state (saved settings, #983) belongs to the called macro,
@@ -1652,6 +1678,9 @@ class MacroRuntime:
         # the ones opensak.open() shows without asking.
         self._written: set[Path] = set()
         self._opened = 0
+        # Macro files the user let read the clipboard in this run (None: an
+        # unsaved macro).
+        self._clipboard_readers: set[Optional[Path]] = set()
         self._cancelled = threading.Event()
         # opensak.progress() windows still open; closed after the run.
         self._progress_windows: list[ProgressHandle] = []
@@ -1700,6 +1729,9 @@ class MacroRuntime:
         # _run) and the number of macros currently running inside this one
         self._load_macro: Optional[Callable] = None
         self._macro_depth = 0
+        # opensak.shift_key(): Shift was held when the user started the
+        # macro (#1038); False inside a macro started by opensak.run_macro().
+        self._shift = False
 
     def cancel(self) -> None:
         """Ask the running macro to stop. Safe to call from another thread;
@@ -1714,6 +1746,15 @@ class MacroRuntime:
             if self._stop is not None:
                 self._stop("macro cancelled")
             raise MacroError("macro cancelled")
+
+    def stop_run(self, code: int, message: str) -> None:
+        """End the running macro with exit code *code*, as opensak.exit()
+        does, so pcall cannot catch it. For a host that can't go on
+        (`opensak run`, #1203); call it while the macro is running."""
+        self._exit_code = code
+        if self._stop is not None:
+            self._stop(message)
+        raise MacroError(message)
 
     # -- API functions exposed to Lua -----------------------------------------
 
@@ -1811,6 +1852,9 @@ class MacroRuntime:
             return
         macro = self._macro_path
         if self._write_approved():
+            return
+        # `opensak run --allow-write`: for this run only, nothing is stored.
+        if getattr(self._host, "allow_write", False):
             return
         if macro not in self._write_denied and self._reconfirm(lambda r: r.write) is not False:
             if self._write_approved():
@@ -2211,6 +2255,7 @@ class MacroRuntime:
     def _attach(self, name=None, schema=None) -> str:
         func = "opensak.attach"
         db = self._require_database(name, func)
+        self._lock_database(db)
         if schema is None:
             schema = default_schema_name(db.name)
         elif not isinstance(schema, str):
@@ -2740,6 +2785,14 @@ class MacroRuntime:
     def _find_database(name: str) -> Optional[DatabaseInfo]:
         return next((db for db in get_db_manager().databases if db.name == name), None)
 
+    def _lock_database(self, db: DatabaseInfo) -> None:
+        """Before using a database other than the active one: `opensak run`
+        (#1203) holds its lock, as it does the active one's. Without a host
+        function for it (the GUI) nothing happens."""
+        lock = getattr(self._host, "lock_database", None)
+        if lock is not None and db.path != get_db_manager().active_path:
+            lock(db)
+
     def _require_database(self, name: Any, func: str) -> DatabaseInfo:
         db = self._find_database(_db_name(name, func))
         if db is None:
@@ -2864,6 +2917,7 @@ class MacroRuntime:
             raise MacroError(f"{func}: {db.name!r} is the active database")
         if not db.exists:
             raise MacroError(f"{func}: the file of database {db.name!r} is missing: {db.path}")
+        self._lock_database(db)
         if options is not None and not hasattr(options, "items"):
             raise MacroError(f'{func}: options must be a table, e.g. {{ if_exists = "skip" }}')
         opts = dict(options.items()) if options is not None else {}
@@ -2905,6 +2959,12 @@ class MacroRuntime:
         quiet = bool(opts.pop("quiet", False))
         settings = service.GsakImportOptions(**opts)
         self._require_write(func)
+        # The targets it names; one named after a GSAK database found in the
+        # source is only known to the importer.
+        for name in {settings.target, *settings.targets.values(), *(settings.databases or [])}:
+            target = self._find_database(name) if name else None
+            if target is not None:
+                self._lock_database(target)
 
         # %APPDATA%\gsak, $HOME/... — as the folder permissions expand them.
         path = expand_path(source.strip())
@@ -3002,6 +3062,7 @@ class MacroRuntime:
         if not db.exists:
             raise MacroError(f"{func}: the file of database {db.name!r} is missing: {db.path}")
         self._require_write(func)
+        self._lock_database(db)
 
         # The files to import, each once. Files and folders of a setting
         # that were moved or deleted since are left out, as in the dialog,
@@ -4299,12 +4360,14 @@ class MacroRuntime:
         # Relative paths in the called macro are its own folder's, and its
         # per-macro state is its own file's.
         previous = (self._base_dir, self._macro_path, self._macro_source,
-                    self._macro_hash, self._edited_from, self._editing)
+                    self._macro_hash, self._edited_from, self._editing, self._shift)
         caller_dbs = self._macro_db_path, dict(self._attachments)
         self._base_dir, self._macro_path = file.parent, file
         # Its own code: only the file as read now counts for its approval.
         self._macro_source, self._macro_hash = source, source_hash(source)
         self._edited_from, self._editing = frozenset(), False
+        # Started by a macro, not by the user: it runs with its saved settings.
+        self._shift = False
         self._macro_depth += 1
         try:
             self._show_declarations()
@@ -4319,7 +4382,7 @@ class MacroRuntime:
     def _end_called_macro(self, previous, caller_dbs, failed: bool) -> None:
         self._macro_depth -= 1
         (self._base_dir, self._macro_path, self._macro_source,
-         self._macro_hash, self._edited_from, self._editing) = previous
+         self._macro_hash, self._edited_from, self._editing, self._shift) = previous
         # The called macro may have switched `macro` to its own file, and
         # attached or detached databases.
         caller_db, caller_attachments = caller_dbs
@@ -4385,13 +4448,29 @@ class MacroRuntime:
         return helpers.format_coordinate(*point, rest[0] if rest else None)
 
     @staticmethod
+    def _geo_method(func: str, value: Any) -> bool:
+        """The optional method of the coords functions: True for
+        "vincenty", False for "haversine" (the default)."""
+        if value is None or value == "haversine":
+            return False
+        if value == "vincenty":
+            return True
+        raise MacroError(f'{func}: method must be "haversine" or "vincenty", got {value!r}')
+
+    @staticmethod
     def _coords_distance(*args) -> float:
-        (a, b), _ = take_points(args, 2, "opensak.coords.distance")
+        func = "opensak.coords.distance"
+        (a, b), rest = take_points(args, 2, func)
+        if MacroRuntime._geo_method(func, rest[0] if rest else None):
+            return geodesy.vincenty_inverse(*a, *b)[0]
         return geodesy.distance_km(*a, *b)
 
     @staticmethod
     def _coords_bearing(*args) -> float:
-        (a, b), _ = take_points(args, 2, "opensak.coords.bearing")
+        func = "opensak.coords.bearing"
+        (a, b), rest = take_points(args, 2, func)
+        if MacroRuntime._geo_method(func, rest[0] if rest else None):
+            return geodesy.vincenty_inverse(*a, *b)[1]
         return geodesy.bearing(*a, *b)
 
     @staticmethod
@@ -4401,6 +4480,8 @@ class MacroRuntime:
         brng, km = (_number(v) for v in (rest + [None, None])[:2])
         if brng is None or km is None:
             raise MacroError(f"{func} expects a point, a bearing in degrees and a distance in km")
+        if MacroRuntime._geo_method(func, rest[2] if len(rest) > 2 else None):
+            return geodesy.vincenty_direct(*point, brng, km)
         return geodesy.project(*point, brng, km)
 
     @staticmethod
@@ -4738,6 +4819,37 @@ class MacroRuntime:
             return None
         return str(self._pick_folder(chosen, func))
 
+    def _set_clipboard(self, text=None) -> None:
+        func = "opensak.set_clipboard"
+        if isinstance(text, (int, float)) and not isinstance(text, bool):
+            text = macro_forms.format_number(text)
+        elif isinstance(text, bytes):       # e.g. opensak.get_url{ binary = true }
+            text = text.decode("utf-8", "replace")
+        if not isinstance(text, str):
+            raise MacroError(f"{func}: text must be a string, got {_lua_kind(text) or repr(text)}")
+        if len(text) > MAX_CLIPBOARD_TEXT:
+            raise MacroError(f"{func}: text is longer than {MAX_CLIPBOARD_TEXT:,} characters")
+        self._ui("set_clipboard", func)(text)
+
+    def _get_clipboard(self, lua) -> str:
+        func = "opensak.get_clipboard"
+        read = self._ui("get_clipboard", func)
+        # The clipboard may hold anything the user copied, passwords too, and
+        # a macro with web access could send it on: put to the user once per
+        # macro file and run.
+        if self._macro_path not in self._clipboard_readers:
+            if not self._host.confirm(
+                    "The macro wants to read the text on the clipboard, which may be "
+                    "private (e.g. a password you copied).\n\nAllow it for this run?"):
+                raise MacroError(f"{func}: the user did not allow reading the clipboard")
+            self._clipboard_readers.add(self._macro_path)
+        text = read()
+        if len(text) > MAX_CLIPBOARD_TEXT:
+            raise MacroError(f"{func}: the clipboard holds more than "
+                             f"{MAX_CLIPBOARD_TEXT:,} characters")
+        json_codec.check_memory(lua, json_codec.string_cost(text), func)
+        return text
+
     def _form(self, lua, spec=None):
         func = "opensak.form"
         show = self._ui("show_form", func)
@@ -4758,6 +4870,7 @@ class MacroRuntime:
             stored = self._load_form_memory(memory).get(key)
             if isinstance(stored, dict):
                 restored = macro_forms.apply_remembered(form, stored, func)
+                form.remembered = {f.id for f in restored if f.id}
 
         session = _FormSession(self, lua, form, restored)
         result = show(form, session.dispatch)
@@ -4908,6 +5021,27 @@ class MacroRuntime:
         data = macro_settings.to_json(value, describe, func)
         macro_settings.save_settings(self._settings_file(func), data, func)
 
+    def _json_encode(self, lua, describe, value=None, options=None) -> str:
+        func = "opensak.json.encode"
+        if value is None:
+            raise MacroError(f"{func} expects a value, got nil")
+        opts = self._options(func, JSON_ENCODE_OPTIONS, options)
+        empty = opts.get("empty", "array")
+        if empty not in ("array", "object"):
+            raise MacroError(f'{func}: empty must be "array" or "object"')
+        indent = int(self._number_option(func, opts, "indent", 0, 0, 8))
+        return json_codec.encode(
+            lua, macro_settings.to_json(value, describe, func, "encode"), func,
+            null=opts.get("null", json_codec.NO_NULL), empty_object=empty == "object",
+            indent=indent,
+        )
+
+    def _json_decode(self, lua, text=None, options=None) -> Any:
+        func = "opensak.json.decode"
+        opts = self._options(func, JSON_DECODE_OPTIONS, options)
+        return json_codec.to_lua(lua, json_codec.decode(text, func), func,
+                                 null=opts.get("null", json_codec.NO_NULL))
+
     def _settings_clear(self) -> None:
         func = "opensak.settings.clear"
         macro_settings.clear_settings(self._settings_file(func), func)
@@ -4979,6 +5113,7 @@ class MacroRuntime:
     def run(
         self, source: str, chunk_name: str = "macro", base_dir: Optional[Path] = None,
         macro_path: Optional[Path] = None, edited_from: Iterable[str] = (),
+        shift: bool = False,
     ) -> int:
         """Execute *source* and return its exit code: the one passed to
         opensak.exit(), 0 otherwise. Raises MacroError on any failure, and
@@ -4991,18 +5126,22 @@ class MacroRuntime:
         *edited_from*: from OpenSAK's macro editor, the hashes
         (db_access.source_hash) of the versions of *source* it loaded,
         saved or ran, so an approval of those still counts.
+        *shift*: Shift was held when the user started the macro, which
+        opensak.shift_key() reports (#1038).
         """
         if not _RUN_LOCK.acquire(blocking=False):
             raise MacroBusy("another macro is still running")
         try:
             with _c_locale():
-                return self._run(source, chunk_name, base_dir, macro_path, edited_from)
+                return self._run(source, chunk_name, base_dir, macro_path, edited_from,
+                                 shift)
         finally:
             _RUN_LOCK.release()
 
     def _run(
         self, source: str, chunk_name: str, base_dir: Optional[Path],
         macro_path: Optional[Path] = None, edited_from: Iterable[str] = (),
+        shift: bool = False,
     ) -> int:
         self._base_dir = base_dir
         self._macro_path = macro_path
@@ -5034,11 +5173,13 @@ class MacroRuntime:
         self._picked = set()
         self._written = set()
         self._opened = 0
+        self._clipboard_readers = set()
         self._cancelled.clear()
         self._exit_code = None
         self._slept = 0.0
         self._polygons = {}
         self._macro_depth = 0
+        self._shift = shift
         self._warned = set()
         self._removed = None
         try:
@@ -5077,6 +5218,9 @@ class MacroRuntime:
             for ns in namespaces:
                 table = table.setdefault(ns, {})
             bound = func.bind(self, lua)
+            if func.value:
+                table[name] = bound
+                continue
             # A Lua function (opensak.transaction) must not be called through
             # Python: errors passing through lose their value.
             if lua_type(bound) == "function":
@@ -5454,7 +5598,7 @@ class _FormSession:
 
 # Raised whenever functions are added or changed in a released build, so
 # macros can check opensak.api_version() before using newer functions.
-API_VERSION = 4
+API_VERSION = 5
 
 # API version → the stable release it first shipped in. Within an API
 # version the API only grows; renaming or removing anything needs a new
@@ -5512,6 +5656,9 @@ class ApiFunction:
     # Contacts web sites: only registered with the lua-macro-net feature
     # flag (beta builds), see utils/flags.py.
     net: bool = False
+    # Not a function: *bind* gives the value of opensak.<name> (opensak.args)
+    # and *returns* its type and description.
+    value: bool = False
     # (API version, what to use instead) once the function is deprecated;
     # it is removed no earlier than one stable release later (API_STABLE),
     # and then goes to REMOVED. Its first call in a run prints a warning.
@@ -5531,6 +5678,8 @@ class ApiFunction:
     @property
     def signatures(self) -> list[str]:
         """E.g. ["opensak.read_csv(path [, sep])"]."""
+        if self.value:
+            return [f"opensak.{self.name}"]
         result = []
         for params in (self.params, *self.overloads):
             text = ""
@@ -5560,6 +5709,10 @@ _TWO_POINT_STRINGS = (
 )
 _BEARING = Param("bearing", "number", "Direction in degrees, 0 = North, clockwise.")
 _DIST = Param("km", "number", "Distance in km.")
+_GEO_METHOD = Param("method", "string",
+                    '`"haversine"` (great circle, the default) or `"vincenty"` '
+                    "(WGS-84 ellipsoid, accurate to the millimetre).",
+                    optional=True)
 _POLYGON = Param("polygon", "string|table", "Polygon file path, or a table of points.")
 _TEXT = Param("text", "string", "The text.")
 _PATTERN = Param("pattern", "string", "Regular expression (Python syntax); a "
@@ -6490,9 +6643,16 @@ API: tuple[ApiFunction, ...] = (
                     "Locked caches can be changed too: the lock only protects "
                     "from imports. `custom` changes custom fields: a table "
                     "of field name → value (see Custom fields). "
+                    "`description` changes the listing description: a table "
+                    "like the one `opensak.description()` returns, where keys "
+                    "left out stay, `html` applies to both texts and `false` "
+                    "clears it all. An import replaces the description and "
+                    "`changed_date` unless the cache is locked. "
                     "Before a macro's first change, OpenSAK asks the user to "
                     "allow that macro (see Changing caches).",
         example='opensak.update("GC12345", { user_flag = true, user_data = { [2] = "solved" } })\n'
+                'opensak.update("GC12345", { description = { long = "<p>Solved</p>", html = true },\n'
+                '                            changed_date = "2026-10-31" })\n'
                 'for c in opensak.caches{ found = true, fields = {"color"} } do\n'
                 '    if not c.color then opensak.update(c.code, { color = "#00AA00" }) end\nend',
         since=3,
@@ -6500,7 +6660,8 @@ API: tuple[ApiFunction, ...] = (
         params=(_CODE, Param("fields", "opensak.CacheUpdate", "The fields to change.")),
         returns=("boolean", "false if the cache is not in the database."),
         write=True,
-        changed=((4, "`custom` changes custom fields"),),
+        changed=((4, "`custom` changes custom fields"),
+                 (5, "`description` and `changed_date` can be written"),),
     ),
     ApiFunction(
         name="macro_flag",
@@ -6540,7 +6701,8 @@ API: tuple[ApiFunction, ...] = (
         params=(Param("fields", "opensak.CacheInsert", "The new cache's fields."),),
         returns=("string", "The cache code as stored (upper case)."),
         write=True,
-        changed=((4, "`custom` sets custom fields"),),
+        changed=((4, "`custom` sets custom fields"),
+                 (5, "`description` and `changed_date` can be set"),),
     ),
     ApiFunction(
         name="delete",
@@ -7124,6 +7286,33 @@ API: tuple[ApiFunction, ...] = (
         returns=("string?", "Full path of the folder, or nil if cancelled."),
     ),
     ApiFunction(
+        name="set_clipboard",
+        description="Put text on the system clipboard, replacing what is "
+                    "there (GSAK's Clip), e.g. to paste a downloaded page "
+                    "into a regex tester. At most "
+                    f"{MAX_CLIPBOARD_TEXT:,} characters. Needs the user "
+                    "interface.",
+        example='opensak.set_clipboard("Copied by a macro")',
+        since=5,
+        bind=lambda rt, lua: rt._set_clipboard,
+        params=(Param("text", "string", "The text."),),
+    ),
+    ApiFunction(
+        name="get_clipboard",
+        description="The text on the system clipboard (GSAK's GetClipText), "
+                    "e.g. to try a macro on different texts by copying them. "
+                    "The clipboard may hold private text, so the user is "
+                    "asked first, once per run; if they say no, the macro "
+                    "stops with an error. A macro that reads it should "
+                    "declare `read-clipboard` in its `Permissions` header. "
+                    "Needs the user interface.",
+        example='local text = opensak.get_clipboard()\n'
+                'print(#text .. " bytes")',
+        since=5,
+        bind=lambda rt, lua: functools.partial(rt._get_clipboard, lua),
+        returns=("string", 'The text, "" if the clipboard holds no text.'),
+    ),
+    ApiFunction(
         name="message",
         description="Show a message with an OK button and wait until the user "
                     "closes it.",
@@ -7341,6 +7530,52 @@ API: tuple[ApiFunction, ...] = (
         returns=("any...", "What the macro returns."),
     ),
     ApiFunction(
+        name="is_headless",
+        description="Whether the macro runs without a window, under `opensak run`, "
+                    "so it can skip its dialogs. False in OpenSAK and with "
+                    "`opensak --run-macro`.",
+        example='local name = opensak.is_headless() and opensak.args.name\n'
+                '    or opensak.input("Name?")',
+        since=5,
+        bind=lambda rt, lua: lambda: rt._headless,
+        returns=("boolean", "True under `opensak run`."),
+    ),
+    ApiFunction(
+        name="args",
+        description="The `--arg key=value` pairs of `opensak run`, with the values "
+                    "as strings. Empty in OpenSAK and with `opensak --run-macro`. "
+                    "A table, not a function.",
+        example='local days = tonumber(opensak.args.days) or 30',
+        since=5,
+        bind=lambda rt, lua: lua.table_from(rt._macro_args),
+        returns=("table<string, string>", "The values by key."),
+        value=True,
+    ),
+    ApiFunction(
+        name="shift_key",
+        description="Whether Shift was held when the user started the macro "
+                    "(GSAK's `$_ShiftKey`), e.g. to show the macro's options "
+                    "only then and otherwise run unattended with the saved "
+                    "ones (`opensak.settings`). Read when the macro is "
+                    "started — with Run in the Macro manager, the macro's "
+                    "shortcut, or Run (F5 or Shift+F5) in the editor — so "
+                    "Shift can be let go at once. Always false in a macro "
+                    "started with `opensak.run_macro()` or "
+                    "`opensak --run-macro`, and for a macro whose own "
+                    "shortcut includes Shift. See the example "
+                    "`quick_filter.lua`.",
+        example='local s = opensak.settings.load()\n'
+                'if opensak.shift_key() or s.name == nil then\n'
+                '  s.name = opensak.input("Your name", s.name or "")\n'
+                '  if not s.name then return end  -- cancelled\n'
+                '  opensak.settings.save(s)\n'
+                'end\n'
+                'print("Hello " .. s.name)',
+        since=5,
+        bind=lambda rt, lua: lambda: rt._shift,
+        returns=("boolean", "true if Shift was held."),
+    ),
+    ApiFunction(
         name="sleep",
         description=f"Pause the macro. One pause lasts at most {MAX_SLEEP_MS // 1000} s "
                     f"and all pauses of a run together at most {SLEEP_BUDGET_S:g} s; "
@@ -7438,14 +7673,17 @@ API: tuple[ApiFunction, ...] = (
     ),
     ApiFunction(
         name="coords.distance",
-        description="Great-circle distance between two points.",
+        description="Distance between two points: along the great circle, or "
+                    "on the WGS-84 ellipsoid with `\"vincenty\"`.",
         example='local km = opensak.coords.distance("N47 22.123 E008 32.456",\n'
-                '                                   "N47 23.000 E008 33.000")',
+                '                                   "N47 23.000 E008 33.000")\n'
+                'local exact = opensak.coords.distance(47.36872, 8.54093, 46.948, 7.4474, "vincenty")',
         since=2,
         bind=lambda rt, lua: rt._coords_distance,
-        params=_TWO_POINTS,
-        overloads=(_TWO_POINT_STRINGS,),
+        params=(*_TWO_POINTS, _GEO_METHOD),
+        overloads=((*_TWO_POINT_STRINGS, _GEO_METHOD),),
         returns=("number", "Distance in km."),
+        changed=((5, "added `method`"),),
     ),
     ApiFunction(
         name="coords.bearing",
@@ -7453,9 +7691,10 @@ API: tuple[ApiFunction, ...] = (
         example='local deg = opensak.coords.bearing(47.36872, 8.54093, 47.38333, 8.55)',
         since=2,
         bind=lambda rt, lua: rt._coords_bearing,
-        params=_TWO_POINTS,
-        overloads=(_TWO_POINT_STRINGS,),
+        params=(*_TWO_POINTS, _GEO_METHOD),
+        overloads=((*_TWO_POINT_STRINGS, _GEO_METHOD),),
         returns=("number", "Degrees, 0 = North, clockwise."),
+        changed=((5, "added `method`"),),
     ),
     ApiFunction(
         name="coords.project",
@@ -7465,9 +7704,10 @@ API: tuple[ApiFunction, ...] = (
                 "print(opensak.coords.format(lat, lon))",
         since=2,
         bind=lambda rt, lua: rt._coords_project,
-        params=(_LAT, _LON, _BEARING, _DIST),
-        overloads=((_COORDS, _BEARING, _DIST),),
+        params=(_LAT, _LON, _BEARING, _DIST, _GEO_METHOD),
+        overloads=((_COORDS, _BEARING, _DIST, _GEO_METHOD),),
         returns=("number, number", "Latitude and longitude of the projected point."),
+        changed=((5, "added `method`"),),
     ),
     ApiFunction(
         name="coords.midpoint",
@@ -7586,6 +7826,62 @@ API: tuple[ApiFunction, ...] = (
         bind=lambda rt, lua: helpers.re_escape,
         params=(_TEXT,),
         returns=("string", "The escaped text."),
+    ),
+
+    # -- opensak.json ---------------------------------------------------------
+    ApiFunction(
+        name="json.decode",
+        description="Turn JSON text into Lua values, e.g. what "
+                    "`opensak.get_url()` downloaded: an object becomes a table "
+                    "with string keys, an array a list starting at 1. Invalid "
+                    "JSON is an error. A Lua table cannot hold nil, so by "
+                    "default a null member is simply absent (it reads as nil) "
+                    "and a null array item leaves a gap, where `#` and "
+                    "`ipairs` are unreliable. With the option `null`, a "
+                    "string, number or boolean of your choice stands in for "
+                    "every null. At most "
+                    f"{json_codec.MAX_JSON_TEXT:,} characters.",
+        example='local q = opensak.json.decode(\'{"Name": "Hut", "MultiChoiceOptions": null}\')\n'
+                'print(q.Name)                -- Hut\n'
+                'print(q.MultiChoiceOptions)  -- nil\n'
+                'local a = opensak.json.decode("[1, null, 3]", { null = false })\n'
+                'print(#a, a[2])              -- 3   false',
+        since=5,
+        bind=lambda rt, lua: functools.partial(rt._json_decode, lua),
+        params=(
+            Param("text", "string", "The JSON text."),
+            Param("options", "{ null?: string|number|boolean }",
+                  "`null`: the value to use for every null.", optional=True),
+        ),
+        returns=("any", "The value; nil if the text is just null."),
+    ),
+    ApiFunction(
+        name="json.encode",
+        description="Turn a Lua value into JSON text. Strings, numbers, "
+                    "booleans and nested tables can be encoded, following the "
+                    "same rules as `opensak.settings.save()`: a table needs "
+                    "string keys, or 1, 2, 3, … for an array. Functions, "
+                    "cyclic tables and infinite numbers are refused. Object "
+                    "keys are sorted, so the same table always gives the same "
+                    "text. An empty table becomes `[]`, or `{}` with the "
+                    "option `empty = \"object\"`. Since a table cannot hold "
+                    "nil, write null with the option `null`: every value equal "
+                    "to it becomes null, also the one `opensak.json.decode()` "
+                    "put in. `indent`: spaces per level for readable text.",
+        example='print(opensak.json.encode({ name = "Hut", tags = {"a", "b"} }))\n'
+                '-- {"name":"Hut","tags":["a","b"]}\n'
+                'print(opensak.json.encode({ note = "<null>" }, { null = "<null>" }))\n'
+                '-- {"note":null}',
+        since=5,
+        bind=lambda rt, lua: functools.partial(rt._json_encode, lua, _lua_describe(lua)),
+        params=(
+            Param("value", "any", "The value to encode."),
+            Param("options",
+                  '{ null?: string|number|boolean, empty?: "array"|"object", indent?: integer }',
+                  "`null`: the value to write as null. `empty`: what an empty "
+                  "table becomes. `indent`: 0 to 8 spaces per level.", optional=True),
+        ),
+        returns=("string", "The JSON text."),
     ),
 
     # -- opensak.text ---------------------------------------------------------
@@ -8410,14 +8706,7 @@ API: tuple[ApiFunction, ...] = (
                 's.types = {"Traditional", "Multi"}\n'
                 'opensak.settings.save(s)',
         since=3,
-        bind=lambda rt, lua: functools.partial(
-            rt._settings_save,
-            # type() and a table's address, captured before the macro could
-            # replace them: lupa gives no stable Python identity for tables.
-            lua.eval('(function(type, fmt) return function(v) local t = type(v) '
-                     'if t == "table" then return t, fmt("%p", v) end return t end '
-                     'end)(type, string.format)'),
-        ),
+        bind=lambda rt, lua: functools.partial(rt._settings_save, _lua_describe(lua)),
         params=(Param("settings", "table", "The settings to save."),),
     ),
     ApiFunction(

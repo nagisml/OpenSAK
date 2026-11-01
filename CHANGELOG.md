@@ -4,6 +4,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Macros can use the clipboard (#1227)** — `opensak.set_clipboard(text)` and
+  `opensak.get_clipboard()` are GSAK's `Clip` and `GetClipText`, e.g. to paste
+  a downloaded page into a regex tester, or to try a macro on different texts.
+  The clipboard may hold private text, so reading it asks the user first, once
+  per run; a macro declares this with `read-clipboard` in its `Permissions`
+  header. The macro API is now version 5. Contributed by nagisml.
+- **Macros can read and write JSON** — `opensak.json.decode(text)` and
+  `opensak.json.encode(value)`, so a macro no longer needs a JSON parser of its
+  own, e.g. for what `opensak.get_url()` downloads. A null is absent (`nil`) by
+  default; the `null` option puts a value of your choice in its place and
+  writes it back as null. Contributed by nagisml.
+- **Macros can change a cache's description and changed date** —
+  `opensak.update()` and `opensak.insert{}` take `description` (a table like
+  the one `opensak.description()` returns) and `changed_date`, which until now
+  needed `opensak.sql_write()`. Caches read by macros have the new field
+  `changed_date`. Contributed by nagisml.
+
 ## [1.22.0-beta.12] — Unreleased
 
 > Headline: **the release candidate for v1.22.0.** Macros, macros that
@@ -17,6 +38,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Faster text search in filters (#1225)** — a filter with a Text Search
+  over descriptions, logs or notes no longer loads every matching cache's
+  logs and descriptions when the database can answer it alone. Where they
+  are still needed (regular expressions, OR filters), each cache's
+  descriptions are no longer repeated once per log.
 - **Macros and custom fields on in stable builds (#1190)** — the
   `lua-macros`, `lua-macro-write` and `companion-db` feature flags are on
   in stable builds too, so the **Macros** menu, the macro write API,
@@ -34,6 +60,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   lose "(beta)", and the companion file is explained in plain words.
   *Importing from the Command Line* gets a systemd timer example next to
   cron.
+- **Import summary names what failed (#465)** — a cache or waypoint that
+  could not be read now shows its code and its line in the file, instead
+  of only the file name. When there are more errors than the summary
+  lists, it says how many more. A database error no longer fills the
+  summary with the SQL statement and the cache's data. Every failing
+  cache, with the full details, is written to the log file. Requested by
+  C3GPS.
 
 ### Fixed
 
@@ -62,8 +95,68 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and the **Choose Columns** dialog always showed the alphabetically first
   one. OpenSAK now remembers, per database, which view you last applied
   and keeps that one selected.
+- **Toolbar filters: Not found, Clear and profiles (#1242)** — the *Not
+  found* and *Available (not found)* choices in the toolbar's quick-filter
+  dropdown no longer list your own caches. ✕ and *None* now also reset that
+  dropdown to *All caches*, and ✕ is enabled whenever any filter is in
+  effect, including when that dropdown is the only one. Picking a saved
+  profile, applying **Set filter** and `opensak.filter()` now combine the
+  filter with the text in the GC code, Name and Where boxes, so the list
+  always matches the toolbar.
 
 ---
+- **Macros can run unattended and show their options only with Shift
+  (#1038)** — the new `opensak.shift_key()` tells a macro whether Shift was
+  held when the user started it (GSAK's `$_ShiftKey`). A macro can then run
+  with its saved options (`opensak.settings`) and open its options form only
+  when the user holds Shift — from Run in the Macro manager (Shift is read
+  before the "Run this macro?" question), from the macro's shortcut, or with
+  the new **Shift+F5** (and **Ctrl+Shift+F5**, Save and run) in the macro
+  editor. A macro started by another macro with `opensak.run_macro()`, or
+  with `opensak --run-macro`, always gets `false`, so it runs unattended; so
+  does a macro whose shortcut itself includes Shift. The macro API is now
+  version 5. New example macro: *Quick filter* (`quick_filter.lua`).
+  Contributed by nagisml.
+
+- **GSAK's distance, bearing and projection functions in SQL (#917)** —
+  Where clauses, macro SQL and imported GSAK filters can use
+  `g_Distance(lat1, lon1, lat2, lon2, 'K')`, `g_Bearing1()` (N, NE, …),
+  `g_Bearing2()` (degrees) and `g_Project(lat, lon, degrees, distance,
+  units, 'G')` (returns `'lat;lon'`) with GSAK's arguments, to measure
+  between any two points without changing the centre point. Each has a
+  great-circle and a high-accuracy Vincenty mode (`'KH'`/`'MH'`,
+  `'V'`, and an optional `'H'` for the bearings). Unlike GSAK, NULL gives
+  NULL, an unknown unit or a non-numeric coordinate is an error instead of
+  a silent 0, identical or antipodal points don't fail, and Vincenty is
+  computed to the millimetre (GSAK stops ~20 cm short). GSAK filters using
+  these functions are now imported as working SQL instead of comments.
+  `opensak.coords.distance()`, `bearing()` and `project()` take an
+  optional `"vincenty"` method too (**macro API version 5**). The new
+  example macro *distance_bearing* lists the caches around any point with
+  distance, compass direction and the great-circle/Vincenty difference.
+  Contributed by nagisml.
+
+---
+- **Map clustering and cache labels (#1087)** — the new ⁂ button on the
+  map switches clustering on and off: off shows every pin on its own. The
+  map regroups at once and remembers your choice. **Settings → Map** has
+  two new choices. **Cluster radius** sets how close pins must be, in
+  screen pixels, to be grouped into a numbered cluster: 10, 20, 40 (as
+  before), 50, 80 or 100. **Cache labels** writes each cache's name or GC
+  code under its pin; the labels appear once you zoom in (zoom 13 and
+  closer). Both apply to the open map, also the split-screen and
+  popped-out map, as soon as you click OK. Contributed by nagisml.
+- **Separation circles on the map (#1087)** — the new ◯ button on the map
+  switches on a circle around every physical cache and its physical
+  stages and final. This helps when you plan a new hide. The circles
+  follow corrected coordinates. Virtuals, Earthcaches, Webcams, events
+  and Labs get none, as they don't count for saturation. They are drawn
+  once you zoom in (zoom 13 and closer). The radius is set under
+  **Settings → Map → Separation circle radius**. It defaults to 0.161 km
+  (0.1 mile), the geocaching.com minimum distance between caches; Off
+  hides the button. The circles are off until you switch them on, and the
+  map remembers your choice. The same button is on the split-screen map
+  and the popped-out map. Contributed by nagisml.
 
 ## [1.22.0-beta.11] — 2026-10-28
 
@@ -81,6 +174,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Map tiles work offline for areas you have viewed (#1111)** — the map
+  now keeps the tiles you view in a cache on disk (previously it forgot
+  them when OpenSAK closed), so an area you looked at while online still
+  shows its map background without a connection for about a week. Set
+  the size under **Settings → Map → Map tile cache** (default 200 MB,
+  *Off* to keep none); **Clear cache** next to it empties it. Where no tiles are available, the map shows
+  *Offline – map tiles unavailable* instead of unexplained grey squares.
+  Only tiles you actually view are stored, as the OpenStreetMap tile
+  policy asks.
 - **Import GSAK views as column views (#1209)** — **File → Import from GSAK
   Database…** offers a third box, **Also import the saved GSAK views**,
   next to filters and user locations. Each view saved in `gsak.db3`
@@ -118,6 +220,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **No long waits without a network connection (#1111)** — once a
+  request finds the network unreachable (no connection, DNS failure,
+  timeout), OpenSAK stops making automatic requests for five minutes
+  instead of waiting for each one to time out: the update check at
+  startup, the boundary data download on first run, and the county packs
+  fetched while importing or updating locations. Caches whose county
+  could not be looked up keep an empty county; *Update waypoint
+  locations* fills it in later. *Help → Check for updates* and the
+  boundary pack dialogs still try every time, and any request that gets
+  through ends the pause.
+- **The map no longer needs unpkg.com (#1111)** — Leaflet 1.9.4,
+  Leaflet.markercluster 1.5.3 and Leaflet-Geoman 2.19.3 are now bundled
+  with OpenSAK instead of being downloaded from the unpkg.com content
+  delivery network each time the map opens. With no internet connection
+  the map used to stay completely blank; now the pins, clustering and
+  map actions work offline (the map background still needs a
+  connection). The licences are listed in `THIRD_PARTY_NOTICES.md`.
 - **Sorting on a custom field column (#1201)** — the first click on the
   header of a custom field column (for example GSAK's `LFL`) showed
   "OpenSAK ran into a problem", and the sort was never remembered for the

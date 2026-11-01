@@ -37,7 +37,7 @@ from opensak.db.database import get_session
 from opensak.db.manager import get_db_manager
 from opensak.db.models import Cache, UserNote, Waypoint
 from opensak.export.file_export import active_database_name
-from opensak.filters.engine import FilterSet, apply_filters_auto
+from opensak.filters.engine import CacheTypeFilter, FilterSet, apply_filters_auto
 from opensak.importer import import_gpx
 from opensak.macro import FolderApproval, MacroRuntime, WriteApproval, db_access
 from opensak.macro.runtime import MacroHost
@@ -419,6 +419,32 @@ def _check_find_with_form(ctx, out):
     assert ctx.host.selected == ["GCEX004"]
 
 
+def _distance_form(c) -> None:
+    """Around GCEX001 (Bern), 100 km along the ellipsoid, shown in the list;
+    the result form is closed with "Another point"."""
+    if not any(f.id == "point" for f in c.form.walk()):
+        press_enter(c)
+        return
+    c.change("point", "N46 56.880 E007 26.844")
+    c.change("radius", 100)
+    c.change("method", "Vincenty (WGS-84 ellipsoid)")
+    c.change("show", True)
+    c.click("run")
+
+
+def _check_distance_bearing(ctx, out):
+    # Around, Another point on the result, then Close the point form
+    assert [c.closer for _, c in ctx.host.forms] == ["run", "again", None]
+    [result] = [c for _, c in ctx.host.forms if c.closer == "again"]
+    page = next(f for f in result.form.walk() if f.type == "html").get("html")
+    assert "5 caches" in page
+    found = ["GCEX001", "GCEX006", "GCEX003", "GCEX008", "GCEX002"]   # nearest first
+    assert [page.index(code) for code in found] == sorted(page.index(code) for code in found)
+    assert "GCEX004" not in page and "GCEX007" not in page
+    assert page.count("<td>100.000</td>") == 8      # the edge, measured back
+    assert ctx.host.applied[-1][1] == 5
+
+
 def _gsak_folder(ctx):
     """A minimal GSAK data folder in %APPDATA%\\gsak, which the user allows
     the macro to read when it asks."""
@@ -456,6 +482,20 @@ def _check_new_since(ctx, out):
     assert re.fullmatch(r"5 unfound caches updated since \S+ UTC", out[0])
     assert ctx.host.applied == [(ctx.host.label, 5)]
     assert ctx.host.label.startswith("New since ")
+
+
+def _quick_filter_first_run(ctx):
+    _, out = ctx.run("quick_filter.lua")       # nothing saved: the form opens
+    assert [k[0] for k, _ in ctx.host.forms] == ["Quick filter options"]
+    ctx.host.applied.clear()
+
+
+def _check_quick_filter(ctx, out):
+    # Without Shift it runs with the saved options and asks nothing (#1038).
+    assert len(ctx.host.forms) == 1
+    [(label, n)] = ctx.host.applied
+    assert label == "Quick filter" and n > 0
+    assert out == [f"{n} caches: Traditional, difficulty up to 2.5, unfound"]
 
 
 def _puzzle(c) -> None:
@@ -514,11 +554,26 @@ def _check_owned_statistics(ctx, out):
     assert "Beer Garden" in page and "Car Museum" in page
 
 
+def _filter_traditionals(ctx: Context) -> None:
+    assert ctx.host.apply_filter(FilterSet().add(CacheTypeFilter(["Traditional Cache"])),
+                                 "Traditionals")
+
+
+def _check_delete_archived(ctx: Context, out: list[str]) -> None:
+    # Whatever the active filter shows, and it stays as it was
+    assert "GCEX005" not in _codes()
+    assert "GCEX001" in _codes()
+    assert "1 archived caches deleted" in out
+    assert ctx.host.filter_name() == "Traditionals"
+
+
 SCENARIOS: dict[str, Scenario] = {
+    "delete_archived.lua": Scenario(setup=_filter_traditionals, check=_check_delete_archived),
     "corrected_coords_form.lua": Scenario(user=_coords_form, check=_check_coords_form),
     "corrected_coords_from_csv.lua": Scenario(setup=_csv_for_the_test_database,
                                               check=_check_csv),
     "database_statistics.lua": Scenario(check=_check_database_statistics),
+    "distance_bearing.lua": Scenario(user=_distance_form, check=_check_distance_bearing),
     "dnf_alert.lua": Scenario(setup=_run_dnf_stats, check=_check_dnf_alert),
     "dnf_stats.lua": Scenario(check=_check_dnf_stats),
     "export_filters_to_gpx.lua": Scenario(check=_check_export_filters),
@@ -529,6 +584,7 @@ SCENARIOS: dict[str, Scenario] = {
     "new_since_last_run.lua": Scenario(setup=_first_run_then_import, check=_check_new_since),
     "owned_statistics.lua": Scenario(check=_check_owned_statistics),
     "puzzle_helper.lua": Scenario(user=_puzzle, check=_check_puzzle),
+    "quick_filter.lua": Scenario(setup=_quick_filter_first_run, check=_check_quick_filter),
     "refile_by_country.lua": Scenario(check=_check_refile),
     "region_coverage.lua": Scenario(check=_check_region_coverage),
     "sql_report.lua": Scenario(check=_check_sql_report),

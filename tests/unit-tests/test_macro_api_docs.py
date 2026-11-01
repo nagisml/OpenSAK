@@ -50,7 +50,7 @@ def test_every_exposed_function_is_documented():
     out: list[str] = []
     MacroRuntime(_Host(), output=out.append).run(  # type: ignore[arg-type]
         "for name, value in pairs(opensak) do\n"
-        "  if type(value) == 'table' then\n"
+        "  if type(value) == 'table' and name ~= 'args' then\n"
         "    for sub in pairs(value) do print(name .. '.' .. sub) end\n"
         "  else print(name) end\n"
         "end")
@@ -156,7 +156,7 @@ def test_npp_autocomplete_is_valid_and_sorted():
     distance = root.find(".//KeyWord[@name='opensak.coords.distance']")
     assert distance is not None and distance.get("func") == "yes"
     forms = distance.findall("Overload")
-    assert [len(form.findall("Param")) for form in forms] == [4, 2]
+    assert [len(form.findall("Param")) for form in forms] == [5, 3]
     assert forms[0].get("retVal") == "number"
     assert "\n" in forms[0].get("descr")
 

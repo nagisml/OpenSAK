@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
 )
 from opensak.gui.icon import OpenSAKMessageBox as QMessageBox
 from PySide6.QtGui import QPixmap, QFont
-from opensak.gui.settings import get_settings, HomePoint
+from opensak.gui.settings import (
+    get_settings, HomePoint, MAP_CLUSTER_RADII, MAP_LABEL_MODES,
+)
 from opensak.gui.dialogs.widgets import (
     DirRow, clamp_dialog_height_to_screen, remember_dialog_geometry,
 )
@@ -459,6 +461,58 @@ class SettingsDialog(QDialog):
 
         group_layout.addSpacing(8)
 
+        # Issue #1087: clustering radius and cache labels. Global; the map
+        # is reloaded after OK, so they apply to the open map (main and
+        # pop-out share the same MapWidget). Clustering itself is switched
+        # on/off with the button on the map.
+        cluster_row = QHBoxLayout()
+        cluster_row.addWidget(QLabel(tr("settings_map_cluster_label")))
+        self._map_cluster_radius = QComboBox()
+        for radius in MAP_CLUSTER_RADII:
+            self._map_cluster_radius.addItem(tr("settings_map_cluster_px", px=radius), radius)
+        cluster_row.addWidget(self._map_cluster_radius)
+        cluster_row.addStretch()
+        group_layout.addLayout(cluster_row)
+
+        labels_row = QHBoxLayout()
+        labels_row.addWidget(QLabel(tr("settings_map_labels_label")))
+        self._map_labels = QComboBox()
+        label_texts = {
+            "off":     tr("settings_map_labels_off"),
+            "name":    tr("col_name"),
+            "gc_code": tr("settings_map_labels_gc_code"),
+        }
+        for mode in MAP_LABEL_MODES:
+            self._map_labels.addItem(label_texts[mode], mode)
+        labels_row.addWidget(self._map_labels)
+        labels_row.addStretch()
+        group_layout.addLayout(labels_row)
+
+        cluster_note = QLabel(tr("settings_map_cluster_note"))
+        cluster_note.setWordWrap(True)
+        cluster_note.setStyleSheet(hint_style())
+        group_layout.addWidget(cluster_note)
+        # Issue #1087: separation circles around physical caches — the map
+        # button switches them on/off, 0 here hides them and the button.
+        separation_row = QHBoxLayout()
+        separation_row.addWidget(QLabel(tr("settings_map_separation_label")))
+        self._map_separation_radius = QDoubleSpinBox()
+        self._map_separation_radius.setRange(0.0, 10.0)
+        self._map_separation_radius.setDecimals(3)
+        self._map_separation_radius.setSingleStep(0.01)
+        self._map_separation_radius.setSpecialValueText(tr("settings_map_separation_off"))
+        self._map_separation_radius.setFixedWidth(100)
+        separation_row.addWidget(self._map_separation_radius)
+        separation_row.addStretch()
+        group_layout.addLayout(separation_row)
+
+        separation_note = QLabel(tr("settings_map_separation_note"))
+        separation_note.setWordWrap(True)
+        separation_note.setStyleSheet(hint_style())
+        group_layout.addWidget(separation_note)
+
+        group_layout.addSpacing(8)
+
         # Issue #718: split-screen map (the single selected cache's map)
         # uses its own radius-bounded query, independent of the overview
         # map_max_caches above — see get_nearby_caches() in filters/engine.py.
@@ -489,6 +543,30 @@ class SettingsDialog(QDialog):
         nearby_note.setWordWrap(True)
         nearby_note.setStyleSheet(hint_style())
         group_layout.addWidget(nearby_note)
+
+        group_layout.addSpacing(8)
+
+        # #1111: on-disk tile cache, so viewed map areas still show offline
+        # (gui/map_profile.py). 0 = off.
+        tile_cache_row = QHBoxLayout()
+        tile_cache_row.addWidget(QLabel(tr("settings_map_tile_cache_label")))
+        self._map_tile_cache = QSpinBox()
+        self._map_tile_cache.setRange(0, 10000)
+        self._map_tile_cache.setSingleStep(50)
+        self._map_tile_cache.setSuffix(" MB")
+        self._map_tile_cache.setSpecialValueText(tr("settings_map_tile_cache_off"))
+        self._map_tile_cache.setFixedWidth(100)
+        tile_cache_row.addWidget(self._map_tile_cache)
+        self._map_tile_cache_clear_btn = QPushButton(tr("settings_map_tile_cache_clear"))
+        self._map_tile_cache_clear_btn.clicked.connect(self._clear_map_tile_cache)
+        tile_cache_row.addWidget(self._map_tile_cache_clear_btn)
+        tile_cache_row.addStretch()
+        group_layout.addLayout(tile_cache_row)
+
+        tile_cache_note = QLabel(tr("settings_map_tile_cache_note"))
+        tile_cache_note.setWordWrap(True)
+        tile_cache_note.setStyleSheet(hint_style())
+        group_layout.addWidget(tile_cache_note)
 
         layout.addWidget(group)
         layout.addStretch()
@@ -1747,6 +1825,19 @@ class SettingsDialog(QDialog):
         self._decode_hints_cb.setChecked(s.default_decode_hints)
         self._map_enabled_cb.setChecked(s.map_enabled)
         self._map_max_caches.setValue(s.map_max_caches)
+        self._map_tile_cache.setValue(s.map_tile_cache_mb)
+        idx = self._map_cluster_radius.findData(s.map_cluster_radius)
+        self._map_cluster_radius.setCurrentIndex(max(idx, 0))
+        idx = self._map_labels.findData(s.map_labels)
+        self._map_labels.setCurrentIndex(max(idx, 0))
+        # Issue #1087 — stored in km, shown in the user's unit like the
+        # nearby radius below.
+        if s.use_miles:
+            self._map_separation_radius.setSuffix(" mi")
+            self._map_separation_radius.setValue(s.map_separation_radius_km * 0.621371)
+        else:
+            self._map_separation_radius.setSuffix(" km")
+            self._map_separation_radius.setValue(s.map_separation_radius_km)
         # Issue #718 — stored value is always km; display in the user's
         # configured unit, same conversion used by filter_dialog.py's
         # DistanceFilter radius field.
@@ -1806,6 +1897,16 @@ class SettingsDialog(QDialog):
             self, new_backup_dir, title=tr("wizard_backup_dir_title"), db_dir=new_db_dir,
         )
 
+    def _clear_map_tile_cache(self) -> None:
+        # #1111: takes effect at once, not on OK — like the other buttons.
+        from opensak.gui import map_profile
+        freed = map_profile.clear_cache()
+        QMessageBox.information(
+            self,
+            tr("settings_map_tile_cache_clear"),
+            tr("settings_map_tile_cache_cleared", size=f"{freed / (1024 * 1024):.1f}"),
+        )
+
     def _save(self) -> None:
         # Auto-commit any in-progress home-point edit when the user clicks OK
         if self._editing_original_name is not None:
@@ -1846,6 +1947,13 @@ class SettingsDialog(QDialog):
         s.default_decode_hints = self._decode_hints_cb.isChecked()
         s.map_enabled = self._map_enabled_cb.isChecked()
         s.map_max_caches = self._map_max_caches.value()
+        s.map_tile_cache_mb = self._map_tile_cache.value()
+        s.map_cluster_radius = self._map_cluster_radius.currentData()
+        s.map_labels = self._map_labels.currentData()
+        separation_val = self._map_separation_radius.value()
+        s.map_separation_radius_km = (
+            separation_val * 1.60934 if s.use_miles else separation_val
+        )
         # Issue #718 — convert back to km for storage if the field was
         # shown in miles (unit combo already saved above via s.use_miles).
         radius_val = self._map_nearby_radius.value()

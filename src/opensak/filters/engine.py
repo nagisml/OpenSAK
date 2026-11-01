@@ -30,9 +30,13 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from opensak import geodesy
 from opensak.db.models import Cache, Log, Trackable, UserNote, Waypoint
 from opensak.filters.line_polygon import LP_MIN_POINTS, LP_MODES, LineShape
-from opensak.utils.constants import DNF_LOG_TYPES, FOUND_LOG_TYPES, LOG_TYPES
+from opensak.geodesy import DIRECTIONS, bearing_direction
+from opensak.utils.constants import (
+    DNF_LOG_TYPES, FOUND_LOG_TYPES, LOG_TYPES, PHYSICAL_WAYPOINT_TYPES,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -79,51 +83,7 @@ def _vincenty_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     difference is up to ~0.3 % on long distances. Falls back to Haversine
     when the formula fails to converge (antipodal points).
     """
-    # WGS84 ellipsoid parameters
-    a = 6378.137          # semi-major axis (km)
-    f = 1 / 298.257223563
-    b = a * (1 - f)       # semi-minor axis (km)
-
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    L = math.radians(lon2 - lon1)
-
-    U1 = math.atan((1 - f) * math.tan(phi1))
-    U2 = math.atan((1 - f) * math.tan(phi2))
-    sU1, cU1 = math.sin(U1), math.cos(U1)
-    sU2, cU2 = math.sin(U2), math.cos(U2)
-
-    lam = L
-    for _ in range(100):
-        sl = math.sin(lam)
-        cl = math.cos(lam)
-        sin_sigma = math.sqrt((cU2 * sl) ** 2 + (cU1 * sU2 - sU1 * cU2 * cl) ** 2)
-        if sin_sigma == 0.0:
-            return 0.0  # coincident points
-        cos_sigma = sU1 * sU2 + cU1 * cU2 * cl
-        sigma = math.atan2(sin_sigma, cos_sigma)
-        sin_alpha = cU1 * cU2 * sl / sin_sigma
-        cos2a = 1 - sin_alpha ** 2
-        cos2sm = (cos_sigma - 2 * sU1 * sU2 / cos2a) if cos2a else 0.0
-        C = f / 16 * cos2a * (4 + f * (4 - 3 * cos2a))
-        lam_prev = lam
-        lam = L + (1 - C) * f * sin_alpha * (
-            sigma + C * sin_sigma * (cos2sm + C * cos_sigma * (-1 + 2 * cos2sm ** 2))
-        )
-        if abs(lam - lam_prev) < 1e-12:
-            break
-    else:
-        return _haversine_km(lat1, lon1, lat2, lon2)  # non-convergence fallback
-
-    u2 = cos2a * (a ** 2 - b ** 2) / b ** 2
-    Av = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)))
-    Bv = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)))
-    ds = Bv * sin_sigma * (
-        cos2sm + Bv / 4 * (
-            cos_sigma * (-1 + 2 * cos2sm ** 2)
-            - Bv / 6 * cos2sm * (-3 + 4 * sin_sigma ** 2) * (-3 + 4 * cos2sm ** 2)
-        )
-    )
-    return b * Av * (sigma - ds)
+    return geodesy.vincenty_inverse(lat1, lon1, lat2, lon2)[0]
 
 
 def vincenty_km_batch(lat0: float, lon0: float, lats, lons):
@@ -944,21 +904,6 @@ class DistanceFilter(BaseFilter):
 
     def __repr__(self) -> str:
         return f"<DistanceFilter {self.to_dict()}>"
-
-
-# Compass directions in clockwise order from north — index i is the 45° sector
-# centred on i*45° (N = 337.5°–22.5°). Language-independent codes; the dialog
-# shows them via tr("bearing_dirs"), which lists the same eight in this order.
-DIRECTIONS: tuple[str, ...] = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-
-
-def bearing_direction(deg: float) -> str:
-    """Compass direction code (see DIRECTIONS) for a bearing in degrees.
-
-    Sectors are half-open [lo, hi) — a bearing of exactly 22.5° is NE —
-    matching DirectionFilter.apply_to_query()'s SQL ranges.
-    """
-    return DIRECTIONS[int(((deg % 360.0) + 22.5) // 45.0) % 8]
 
 
 def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -2500,13 +2445,15 @@ class TextSearchFilter(BaseFilter):
             conditions.append(
                 exists().where(
                     (Log.cache_id == Cache.id) & column_cond(Log.text)
-                )
+                ).correlate(Cache)
             )
         if self.search_notes:
+            # Explicit .correlate(Cache) for the lightweight path, same as
+            # HasCorrectedFilter (#752).
             conditions.append(
                 exists().where(
                     (UserNote.cache_id == Cache.id) & column_cond(UserNote.note)
-                )
+                ).correlate(Cache)
             )
         cond = or_(*conditions)
         return query.filter(~cond if self._negated else cond)
@@ -4111,10 +4058,11 @@ def _apply_sql_pushdown(queryable, filterset: Optional["FilterSet"]):
 class _RelationshipNeeds:
     """Which relationships/deferred fields a filterset actually touches.
 
-    apply_filters() uses this to decide what to joinedload/raiseload/defer.
-    apply_filters_lightweight() uses it to decide whether it can serve the
-    request at all — LightweightCache has none of these, so any True flag
-    means falling back to the full apply_filters() ORM path.
+    These are what the filters' Python matches() would read. When every
+    filter is pushed into SQL matches() never runs, so nothing here is needed
+    (#1225). Otherwise apply_filters() uses this to decide what to load/
+    raiseload/defer, and apply_filters_lightweight() falls back to it on any
+    True flag, since LightweightCache has none of these.
     """
     attributes: bool
     trackables: bool
@@ -4145,17 +4093,8 @@ def _filterset_relationship_needs(filterset: Optional["FilterSet"]) -> _Relation
     needs_description = any(f.search_description for f in _text_filters)
     needs_hint = any(f.search_hint for f in _text_filters)
     needs_logs = any(f.search_logs for f in _text_filters)
-    # Issue #752: search_notes was never checked here, so a TextSearchFilter
-    # scoped to *only* User Notes (search_description/search_logs/
-    # search_hint all False) fell through with every _RelationshipNeeds
-    # flag False, and apply_filters_lightweight() then took the fast Core
-    # select() path — where TextSearchFilter.apply_to_query()'s notes
-    # exists() subquery raises an auto-correlation InvalidRequestError,
-    # since that subquery was written for (and only ever tested against)
-    # apply_filters()'s ORM Query, which correlates automatically in a way
-    # Core select() doesn't. Treating notes like description/logs/hint here
-    # routes notes-only searches to the full ORM path instead, which
-    # already handles the same exists() subquery correctly.
+    # Issue #752: search_notes must count too — TextSearchFilter.matches()
+    # reads UserNote.note, which LightweightUserNote doesn't carry.
     needs_notes = any(f.search_notes for f in _text_filters)
     # UserNoteFilter.matches() reads UserNote.note, which
     # LightweightUserNote doesn't carry — an OR group left to Python would
@@ -4206,40 +4145,17 @@ def apply_filters(
     # Pre-populate WhereClauseFilter matching IDs by running the raw SQL against SQLite.
     # This must happen before the Python-level filter loop below.
     _prepare_where_clause_filters(session, filterset, distance_from)
+    return _apply_filters_prepared(session, filterset, sort, limit, columns)
 
-    # Determine which relationships are actually needed by the active filters.
-    # Only joinedload what is required — avoids loading thousands of attribute
-    # and trackable rows when the filterset contains only a NameFilter or a
-    # simple quick-filter (the common case during live search).
-    _needs = _filterset_relationship_needs(filterset)
-    needs_hint_column = columns is not None and "hints" in columns
 
-    # Issue #898: relationships no filter needs use raiseload() (was the
-    # deprecated noload()). The returned caches are handed to the GUI after
-    # the session has closed (see refresh_worker.py), so nothing may lazy-load
-    # them there — noload() made such access silently return an empty list,
-    # raiseload() makes it fail loudly instead. Code that needs the full
-    # relationships must reload the cache (reload_caches_full() /
-    # MainWindow._load_full_cache()); the grid uses the cached count/date
-    # columns (log_count, waypoint_count, last_log_date, ...).
-    from sqlalchemy.orm import defer, joinedload, raiseload
-    _opts: list = [
-        joinedload(Cache.attributes) if _needs.attributes else raiseload(Cache.attributes),
-        joinedload(Cache.trackables) if _needs.trackables else raiseload(Cache.trackables),
-        # Log/Waypoint filters count via their prepare() query, not the
-        # relationship, so logs are only joinedloaded for a text search in
-        # log text — never for all logs of all caches otherwise.
-        joinedload(Cache.logs)       if _needs.logs        else raiseload(Cache.logs),
-        raiseload(Cache.waypoints),
-        joinedload(Cache.user_note),
-    ]
-    # Defer the large free-text blobs unless text search needs them.
-    if not _needs.description:
-        _opts += [defer(Cache.short_description), defer(Cache.long_description)]
-    if not _needs.hint and not needs_hint_column:
-        _opts.append(defer(Cache.encoded_hints))
-    query = session.query(Cache).options(*_opts)
-
+def _apply_filters_prepared(
+    session: Session,
+    filterset: Optional[FilterSet],
+    sort: Optional[SortSpec],
+    limit: Optional[int],
+    columns: Optional[frozenset[str]],
+) -> list[Cache]:
+    """apply_filters() after _prepare_where_clause_filters() has run."""
     # Push SQL-capable filters into the query before loading rows.
     # This lets SQLite discard non-matching rows before any Python objects are
     # constructed — critical on large DBs. Only filters reachable through an
@@ -4260,7 +4176,48 @@ def apply_filters(
     # filter types, e.g. WhereClauseFilter/HasTrackableFilter, have no SQL
     # form and always fall back to Python matches() via the default
     # BaseFilter.apply_to_query() returning None).
-    query, fully_sql_pushed = _apply_sql_pushdown(query, filterset)
+    query, fully_sql_pushed = _apply_sql_pushdown(session.query(Cache), filterset)
+
+    # Determine which relationships are actually needed by the active filters.
+    # Only load what is required — avoids loading thousands of attribute
+    # and trackable rows when the filterset contains only a NameFilter or a
+    # simple quick-filter (the common case during live search).
+    #
+    # Issue #1225: the logs and text blobs are only read by matches(), so a
+    # text search that was fully pushed into SQL loads neither.
+    _needs = _filterset_relationship_needs(filterset)
+    needs_logs = _needs.logs and not fully_sql_pushed
+    needs_description = _needs.description and not fully_sql_pushed
+    needs_hint = _needs.hint and not fully_sql_pushed
+    needs_hint_column = columns is not None and "hints" in columns
+
+    # Issue #898: relationships no filter needs use raiseload() (was the
+    # deprecated noload()). The returned caches are handed to the GUI after
+    # the session has closed (see refresh_worker.py), so nothing may lazy-load
+    # them there — noload() made such access silently return an empty list,
+    # raiseload() makes it fail loudly instead. Code that needs the full
+    # relationships must reload the cache (reload_caches_full() /
+    # MainWindow._load_full_cache()); the grid uses the cached count/date
+    # columns (log_count, waypoint_count, last_log_date, ...).
+    from sqlalchemy.orm import defer, joinedload, raiseload, selectinload
+    _opts: list = [
+        joinedload(Cache.attributes) if _needs.attributes else raiseload(Cache.attributes),
+        joinedload(Cache.trackables) if _needs.trackables else raiseload(Cache.trackables),
+        # Log/Waypoint filters count via their prepare() query, not the
+        # relationship, so logs are only loaded for a text search in log
+        # text — never for all logs of all caches otherwise. selectinload,
+        # as a join would repeat the cache's descriptions on every log row
+        # (#1225).
+        selectinload(Cache.logs)     if needs_logs         else raiseload(Cache.logs),
+        raiseload(Cache.waypoints),
+        joinedload(Cache.user_note),
+    ]
+    # Defer the large free-text blobs unless text search needs them.
+    if not needs_description:
+        _opts += [defer(Cache.short_description), defer(Cache.long_description)]
+    if not needs_hint and not needs_hint_column:
+        _opts.append(defer(Cache.encoded_hints))
+    query = query.options(*_opts)
 
     # Resolve sort early so column-backed fields can be ordered in SQL.
     if sort is None:
@@ -4325,6 +4282,8 @@ def apply_filters(
 # lightweight path is a pure performance shortcut for the common case
 # (table/map display with simple filters), the same relationship the SQL
 # push-down in apply_filters() has to its own Python matches() fallback.
+# Only matches() reads those fields, so a filterset handled entirely in SQL
+# (e.g. a plain text search, #1225) stays on this path whatever it searches.
 #
 # mainwindow.py's table and map refresh call apply_filters_auto() (below),
 # which always attempts this path — wired in via beta.10 (table) and
@@ -4500,7 +4459,7 @@ def apply_filters_lightweight(
     """Like apply_filters(), but returns LightweightCache rows instead of
     full Cache ORM objects when it safely can — see the module comment
     above for why and when. Falls back to apply_filters() (returning real
-    Cache ORM objects, unchanged) whenever the filterset needs a
+    Cache ORM objects, unchanged) whenever a filter left to Python needs a
     relationship or deferred text field this path doesn't carry.
 
     Callers that only display scalar fields (table, map) can treat the
@@ -4534,7 +4493,7 @@ def apply_filters_lightweight(
     _needs = _filterset_relationship_needs(filterset)
     needs_hint_column = columns is not None and "hints" in columns
     needs_notes_column = columns is not None and "notes" in columns
-    if _needs.any or needs_hint_column or needs_notes_column:
+    if needs_hint_column or needs_notes_column:
         return apply_filters(session, filterset, sort, limit, distance_from, columns=columns)
 
     _prepare_where_clause_filters(session, filterset, distance_from)
@@ -4546,6 +4505,8 @@ def apply_filters_lightweight(
         .outerjoin(UserNote, UserNote.cache_id == Cache.id)
     )
     sel, fully_sql_pushed = _apply_sql_pushdown(sel, filterset)
+    if _needs.any and not fully_sql_pushed:
+        return _apply_filters_prepared(session, filterset, sort, limit, columns)
     # A filterset of None trivially has nothing left for Python to check —
     # same nuance the final results-selection block below already relies on
     # via `if filterset and not fully_sql_pushed`.
@@ -4579,8 +4540,8 @@ def apply_filters_lightweight(
 
     if filterset and not fully_sql_pushed:
         # LightweightCache duck-types Cache for every attribute a filter's
-        # matches() could touch here — _filterset_relationship_needs()
-        # above already guaranteed nothing in this filterset needs a
+        # matches() could touch here — the fallback above already
+        # guaranteed nothing in this filterset needs a
         # relationship or deferred text field LightweightCache doesn't
         # carry. matches() is typed for Cache specifically since it's the
         # common/default case everywhere else in the codebase.
@@ -4723,6 +4684,30 @@ def user_flagged_codes(session: Session) -> list[str]:
         .all()
     )
     return [row[0] for row in rows]
+
+
+def physical_waypoint_coords(session: Session, cache_ids: list[int]) -> list[tuple[float, float]]:
+    """Coordinates of the physical stages and finals (PHYSICAL_WAYPOINT_TYPES)
+    of the given caches — for the map's separation circles (#1087).
+    Waypoints without coordinates, or at 0/0, are left out."""
+    coords: list[tuple[float, float]] = []
+    # Chunked to stay under SQLite's bound-parameter limit.
+    for i in range(0, len(cache_ids), 500):
+        rows = (
+            session.query(Waypoint.latitude, Waypoint.longitude)
+            .filter(
+                Waypoint.cache_id.in_(cache_ids[i:i + 500]),
+                Waypoint.wp_type.in_(PHYSICAL_WAYPOINT_TYPES),
+                Waypoint.latitude.is_not(None),
+                Waypoint.longitude.is_not(None),
+            )
+            .all()
+        )
+        coords.extend(
+            (lat, lon) for lat, lon in rows
+            if lat is not None and lon is not None and (lat or lon)
+        )
+    return coords
 
 
 def get_nearby_caches(
