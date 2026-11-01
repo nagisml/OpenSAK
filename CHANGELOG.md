@@ -103,6 +103,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   profile, applying **Set filter** and `opensak.filter()` now combine the
   filter with the text in the GC code, Name and Where boxes, so the list
   always matches the toolbar.
+- **Last four logs column sorted by date, not by its squares (#1154)** —
+  sorting on the column followed the date of the newest log, so caches
+  showing the same squares didn't end up together. It now sorts by the
+  pattern the squares show, most recent log first: DNF, then found, then
+  other logs, then empty slots. Ascending puts caches with consecutive
+  recent DNFs at the top; within a pattern the most recently logged cache
+  comes first. A filter's saved sort on this field, which was ignored,
+  now gives the same order. The squares themselves are unchanged.
 
 ---
 - **Macros can run unattended and show their options only with Shift
