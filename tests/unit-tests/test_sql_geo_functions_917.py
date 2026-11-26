@@ -301,8 +301,8 @@ def test_macro_sql(caches):
 
 def test_gsak_filter_import_keeps_the_functions():
     sql, warnings, _notes, verified = translate_where(
-        "g_Distance(Latitude, Longitude, 47.37, 8.54, 'KH') < 5 and g_Bearing1(47.37, 8.54, "
-        "Latitude, Longitude) = 'SW'")
+        "g_Distance(LatOriginal, LonOriginal, 47.37, 8.54, 'KH') < 5 and g_Bearing1(47.37, 8.54, "
+        "LatOriginal, LonOriginal) = 'SW'")
     assert verified and not warnings
     assert "g_Distance(latitude, longitude, 47.37, 8.54, 'KH')" in sql
     # other g_ names still only exist while a GSAK macro runs

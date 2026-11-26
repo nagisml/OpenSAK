@@ -127,8 +127,8 @@ GSAK_TYPE_LABEL_TO_OSAK: dict[str, Optional[str]] = {
     "Locationless":    "Locationless (Reverse) Cache",
     "Benchmark":       "Benchmark",   # not in CACHE_TYPES, but the GSAK importer
     "Other":           "Other",       # writes both of these verbatim
-    "Waymark":         None,          # no OpenSAK equivalent
-    "L&F Celebration": None,          # GSAK code D — deliberately unmapped
+    "Waymark":         "Waymark",
+    "L&F Celebration": "Geocaching HQ Celebration",
 }
 
 # GSAK container checkbox key → OpenSAK CONTAINER_SIZES value.
@@ -502,7 +502,8 @@ _CUSTOM_CCODE_RES = (
 
 # GSAK's own column and table names, which are never custom fields.
 _GSAK_IDENTIFIERS = (set(WHERE_COLUMN_MAP) | set(WHERE_SUBTABLE_MAP) | set(WHERE_TABLE_MAP)
-                     | set(WHERE_CUSTOM_TABLE_MAP) | {"status", "tempdisabled"})
+                     | set(WHERE_CUSTOM_TABLE_MAP)
+                     | {"status", "tempdisabled", "ltime", "kbeforelat", "kbeforelon"})
 
 
 def _rewrite_custom_code(sql: str) -> str:
@@ -548,11 +549,6 @@ WHERE_SOFT_NOTES: dict[str, str] = {
                   "which is >= 1 for every cache GSAK would have counted",
     "hascorrected": "GSAK's HasCorrected became a sub-select on OpenSAK's user_notes.is_corrected",
     "usernote": "GSAK's UserNote became a sub-select on OpenSAK's user_notes.note",
-    "latitude": "GSAK's Latitude/Longitude hold the CORRECTED position for a solved cache; "
-                "OpenSAK's caches.latitude/longitude always hold the posted position and keep "
-                "the correction in user_notes.corrected_lat/corrected_lon. Wrap the column in "
-                "coalesce((SELECT corrected_lat FROM user_notes WHERE user_notes.cache_id = "
-                "caches.id), latitude) if the clause meant the corrected position",
     "kafterlat": "GSAK's Corrected table became OpenSAK's user_notes (kCode → cache_id, "
                  "kAfterLat/kAfterLon → corrected_lat/corrected_lon)",
     "clat": "GSAK's child-waypoint coordinates (cLat/cLon) became OpenSAK's "
@@ -564,7 +560,6 @@ WHERE_SOFT_NOTES["latoriginal"] = (
     "in user_notes.corrected_lat/corrected_lon"
 )
 WHERE_SOFT_NOTES["lonoriginal"] = WHERE_SOFT_NOTES["latoriginal"]
-WHERE_SOFT_NOTES["longitude"] = WHERE_SOFT_NOTES["latitude"]
 WHERE_SOFT_NOTES["kafterlon"] = WHERE_SOFT_NOTES["kafterlat"]
 WHERE_SOFT_NOTES["kcode"] = WHERE_SOFT_NOTES["kafterlat"]
 WHERE_SOFT_NOTES["clon"] = WHERE_SOFT_NOTES["clat"]
@@ -573,11 +568,6 @@ WHERE_SOFT_NOTES["clon"] = WHERE_SOFT_NOTES["clat"]
 # translated clause "unverified", which keeps it out of the executable SQL and
 # puts it in the Where tab as a comment instead.
 WHERE_UNMAPPABLE: dict[str, str] = {
-    "ltime":     "GSAK's logs.lTime is a separate time-of-day column; OpenSAK folds date and "
-                 "time into logs.log_date, so compare against that instead",
-    "kbeforelat": "GSAK's Corrected.kBeforeLat/kBeforeLon (the posted position of a solved "
-                  "cache) became OpenSAK's caches.latitude/longitude — they are not columns of "
-                  "user_notes, so this sub-select needs a join back to caches",
     "cachememo": "GSAK's CacheMemo table is split across OpenSAK's caches / user_notes columns",
     # Mapped to caches_all (WHERE_CUSTOM_TABLE_MAP) while custom fields are on.
     "cachesall": "GSAK's CachesAll view (caches plus their custom fields) needs OpenSAK's "
@@ -591,7 +581,33 @@ WHERE_UNMAPPABLE: dict[str, str] = {
     "favperc":   "GSAK's FavPerc (favourite percentage) is not stored by OpenSAK",
     "labid":     "GSAK's LabId is not stored by OpenSAK",
 }
-WHERE_UNMAPPABLE["kbeforelon"] = WHERE_UNMAPPABLE["kbeforelat"]
+
+# GSAK's Latitude/Longitude hold the CORRECTED position of a solved cache and
+# LatOriginal/LonOriginal the posted one. OpenSAK's caches.latitude/longitude
+# are the posted position and the correction lives in user_notes, so GSAK's
+# corrected columns translate to the correction with the posted one as fallback.
+_GSAK_CORRECTED_POSITION: dict[str, tuple[str, str]] = {
+    "latitude":  ("latitude", "corrected_lat"),
+    "longitude": ("longitude", "corrected_lon"),
+}
+# GSAK's Corrected.kBeforeLat/kBeforeLon: the posted position, which OpenSAK
+# keeps on the cache and not in user_notes.
+_GSAK_POSTED_POSITION: dict[str, str] = {
+    "kbeforelat": "latitude",
+    "kbeforelon": "longitude",
+}
+
+# GSAK has no trackable count, so filters count the "ref =" lines of
+# CacheMemo.TravelBugs in a nested select; OpenSAK stores the count.
+_TRAVELBUG_COUNT_RE = re.compile(
+    r"\bcode\s+in\s*\(\s*select\s+code\s+from\s*\(\s*select\s+\w+\.code\s*,\s*"
+    r"\(\s*\(\s*length\(\s*travelbugs\s*\)\s*-\s*"
+    r"length\(\s*replace\(\s*travelbugs\s*,\s*'ref\s*='\s*,\s*''\s*\)\s*\)\s*\)\s*/\s*"
+    r"length\(\s*'ref\s*='\s*\)\s*\)\s*as\s+(\w+)\s+"
+    r"from\s+caches\s+\w+\s*,\s*cachememo\s+\w+\s+"
+    r"where\s+\w+\.code\s*=\s*\w+\.code\s+and\s+\1\s*(>=|<=|<>|!=|=|>|<)\s*(\d+)\s*\)\s*\)",
+    re.IGNORECASE,
+)
 
 # GSAK Status ('A' active, 'T' temporarily disabled, 'X' archived) → the
 # equivalent test on OpenSAK's archived / available booleans. Verified 1:1
@@ -625,7 +641,8 @@ GSAK_CODE_TO_OSAK: dict[str, Optional[str]] = {
     "P": "Geocaching HQ Block Party",
     "X": "GPS Adventures Maze", "Z": "Mega-Event Cache",
     "F": "Community Celebration Event",
-    "D": None, "Y": None,
+    "D": "Geocaching HQ Celebration",
+    "Y": "Waymark",
 }
 
 # OpenSAK columns (and sub-selects) that hold numbers. GSAK's saved SQL often
@@ -676,13 +693,6 @@ _STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 _IDENT_RE = re.compile(
     r"\b(?:(?P<qual>[A-Za-z_][A-Za-z_0-9]*)\s*\.\s*)?(?P<word>[A-Za-z_][A-Za-z_0-9]*)\b")
 _CACHETYPE_IN_RE = re.compile(r"\bcachetype\b\s+(not\s+)?in\s*\(([^)]*)\)", re.IGNORECASE)
-# GSAK's Latitude/Longitude hold the CORRECTED position of a solved cache and
-# LatOriginal/LonOriginal the posted one; OpenSAK's caches.latitude/longitude
-# are the posted position and the correction lives in user_notes. Both GSAK
-# columns therefore translate to the same OpenSAK column, so a clause that
-# compares the two collapses into a tautology and has to be flagged.
-_GSAK_ORIGINAL_POS_RE = re.compile(r"\b(?:latoriginal|lonoriginal)\b", re.IGNORECASE)
-_GSAK_CORRECTED_POS_RE = re.compile(r"\b(?:latitude|longitude)\b", re.IGNORECASE)
 _CACHETYPE_CMP_RE = re.compile(r"\bcachetype\b\s*(=|<>|!=)\s*'([A-Za-z])'", re.IGNORECASE)
 
 # SQL keywords, functions and OpenSAK table names that are never column names.
@@ -835,6 +845,11 @@ _ALIAS_RE = re.compile(
 #
 # Applied after the identifier renames, so these patterns already talk about
 # OpenSAK column names (gc_code / cache_id) rather than GSAK's.
+# Unqualified "gc_code" is the outer cache's: an unqualified join to it.
+_JOIN_BARE_CODE_RE = re.compile(
+    r"\b(?P<b>[A-Za-z_][A-Za-z_0-9]*\.)?cache_id\b\s*=\s*(?<![.\w])gc_code\b", re.IGNORECASE)
+_JOIN_BARE_CODE_REV_RE = re.compile(
+    r"(?<![.\w])gc_code\b\s*=\s*(?P<b>[A-Za-z_][A-Za-z_0-9]*\.)?cache_id\b", re.IGNORECASE)
 _JOIN_CODE_TO_ID_RE = re.compile(
     r"\b(?P<a>[A-Za-z_][A-Za-z_0-9]*)\.gc_code\b\s*=\s*"
     r"(?P<b>[A-Za-z_][A-Za-z_0-9]*\.)?cache_id\b", re.IGNORECASE)
@@ -910,6 +925,14 @@ def _relink_code_joins(sql: str, notes: list[str]) -> str:
     sql = _JOIN_CODE_TO_ID_RE.sub(_sub_join, sql)
     sql = _JOIN_ID_TO_CODE_RE.sub(_sub_join_rev, sql)
 
+    def _sub_bare(m: re.Match) -> str:
+        nonlocal hit
+        hit = True
+        return f"{m.group('b') or ''}cache_id = caches.id"
+
+    sql = _JOIN_BARE_CODE_RE.sub(_sub_bare, sql)
+    sql = _JOIN_BARE_CODE_REV_RE.sub(_sub_bare, sql)
+
     # "code [not] in (select lParent …)" → "id [not] in (select cache_id …)".
     out: list[str] = []
     pos = 0
@@ -973,6 +996,7 @@ def translate_where(sql: str, custom_columns: Optional[list[str]] = None,
     from opensak.db.custom_fields import rename_for_import
     warnings: list[str] = []
     notes: list[str] = []
+    sql = _TRAVELBUG_COUNT_RE.sub(lambda m: f"tbcount {m.group(2)} {m.group(3)}", sql)
     sql = _expand_cachetype_codes(sql, warnings, notes)
     sql = _expand_status(sql, notes)
     custom_on = known_fields is not None
@@ -1004,19 +1028,11 @@ def translate_where(sql: str, custom_columns: Optional[list[str]] = None,
             prefix = f"{qual}." if qual else ""
 
             def _keep(mapped: str) -> str:
-                """Re-attach the table qualifier — unless the mapping is an
-                expression rather than a bare column name, in which case the
-                qualifier cannot survive."""
+                """Re-attach the table qualifier; an expression correlates to
+                it instead of the outer caches row."""
                 if mapped.isidentifier():
                     return prefix + mapped
-                if qual:
-                    notes.append(
-                        f"where: '{prefix}{word}' maps to a sub-select on OpenSAK's user_notes, "
-                        f"which cannot carry the '{qual}' table qualifier — the sub-select is "
-                        f"correlated to the outer caches row instead, so check the logic if "
-                        f"'{qual}' was not that outer caches table"
-                    )
-                return mapped
+                return mapped.replace("caches.id", f"{qual}.id") if qual else mapped
 
             low = word.lower()
             # Before the aliases: "custom.Code" makes custom a qualifier too.
@@ -1046,6 +1062,27 @@ def translate_where(sql: str, custom_columns: Optional[list[str]] = None,
                     f"substitute a literal value"
                 )
                 return prefix + word
+            if low in _GSAK_CORRECTED_POSITION:
+                column, corrected = _GSAK_CORRECTED_POSITION[low]
+                notes.append(
+                    "where: GSAK's Latitude/Longitude hold the corrected position of a solved "
+                    "cache, so they became the correction from user_notes, or the posted "
+                    "position when there is none"
+                )
+                return (f"coalesce((SELECT {corrected} FROM user_notes WHERE "
+                        f"user_notes.cache_id = {qual or 'caches'}.id), {prefix}{column})")
+            if low in _GSAK_POSTED_POSITION:
+                notes.append(
+                    "where: GSAK's Corrected.kBeforeLat/kBeforeLon (the posted position) became "
+                    "a lookup of OpenSAK's caches.latitude/longitude"
+                )
+                return (f"(SELECT {_GSAK_POSTED_POSITION[low]} FROM caches WHERE "
+                        f"caches.id = {qual or 'user_notes'}.cache_id)")
+            if low == "ltime":
+                notes.append(
+                    "where: GSAK's logs.lTime became the time part of OpenSAK's logs.log_date"
+                )
+                return f"substr({prefix}log_date, 12, 8)"
             if low in WHERE_INVERTED:
                 warnings.append(
                     f"where: '{word}' → {WHERE_INVERTED[low]} — inverted meaning, verify the logic"
@@ -1070,18 +1107,6 @@ def translate_where(sql: str, custom_columns: Optional[list[str]] = None,
             return prefix + word
 
         out.append(_IDENT_RE.sub(_sub_ident, chunk))
-
-    if _GSAK_ORIGINAL_POS_RE.search(sql) and _GSAK_CORRECTED_POS_RE.search(
-            _GSAK_ORIGINAL_POS_RE.sub("", sql)):
-        warnings.append(
-            "where: the clause compares GSAK's Latitude/Longitude (the CORRECTED position of a "
-            "solved cache) against LatOriginal/LonOriginal (the posted one). OpenSAK's "
-            "caches.latitude/longitude ARE the posted position and keep the correction in "
-            "user_notes, so both GSAK columns translate to the same OpenSAK column and the "
-            "comparison collapses into a tautology — rewrite the corrected side as "
-            "coalesce((SELECT corrected_lat FROM user_notes WHERE user_notes.cache_id = "
-            "caches.id), latitude)"
-        )
 
     sql = _relink_code_joins("".join(out), notes)
     sql = _unquote_numeric_literals(sql, notes)
@@ -1187,6 +1212,11 @@ class Options:
     # The custom fields OpenSAK has, {name: type} (the active database's,
     # #1028); None when custom fields are off in this build.
     custom_fields: Optional[dict[str, str]] = None
+    # The fields of GSAK's other databases, {name: type}: a clause may use one
+    # of them, because a profile serves every database.
+    other_custom_fields: dict[str, str] = dc_field(default_factory=dict)
+    # Returns why a clause can't run on the active database, or None.
+    validate_sql: Optional[Callable[[str], Optional[str]]] = None
 
 
 class Conversion:
@@ -1885,22 +1915,18 @@ def _convert_text_search(gf: GsakFilter, c: Conversion) -> None:
     # individual Logs / Notizen / Beschreibung boxes are ignored by GSAK — they
     # are only read for "Nur ausgewählte" (rbtFullSelect).
     search_all = bool(gf.flag("RbtFullAll", False))
+    regex = bool(gf.flag("chkRegEx", False))
     c.native("Text search", TextSearchFilter(
         text=text,
         search_description=search_all or bool(gf.flag("chkFullDes", False)),
         search_logs=search_all or bool(gf.flag("chkFullLogs", False)),
         search_notes=search_all or bool(gf.flag("chkFullNotes", False)),
         search_hint=False,
+        op="regex" if regex else "contains",
     ))
     if search_all:
         c.note("Text search: GSAK searched \"everywhere\", which became description + logs + "
                "notes (OpenSAK's hint search stays off)")
-    if gf.flag("chkRegEx", False):
-        c.comment("Text search (regular expression)", (
-            f"GSAK searched for \"{text}\" as a regular expression. OpenSAK's full-text "
-            f"search is a plain substring match, so it was migrated as one — widen or "
-            f"narrow it by hand if the expression mattered"
-        ))
     if gf.flag("chkFullHighlight", False):
         c.note("Text search: GSAK's \"highlight matches\" option has no OpenSAK equivalent")
 
@@ -2526,6 +2552,9 @@ def _trackable_name_criterion(gf: GsakFilter, c: Conversion) -> None:
            "trackable whose name matches")
 
 
+_NO_SUCH_COLUMN_RE = re.compile(r"no such column: (?:\w+\.)?(\w+)", re.IGNORECASE)
+
+
 def _convert_where(gf: GsakFilter, c: Conversion, opts: Options) -> None:
     """GSAK's own where clause.
 
@@ -2537,13 +2566,23 @@ def _convert_where(gf: GsakFilter, c: Conversion, opts: Options) -> None:
     if not gf.where:
         return
     custom_columns = [line.split(";")[0] for line in gf.custom if line.split(";")[0]]
-    known = list(opts.custom_fields) if opts.custom_fields is not None else None
+    known = ([*opts.custom_fields, *opts.other_custom_fields]
+             if opts.custom_fields is not None else None)
     sql, warnings, notes, verified = translate_where(gf.where, custom_columns, opts.me, known)
     for note in notes:
         c.note(note)
     if verified:
-        c.sql("GSAK where clause", sql)
-        return
+        error = opts.validate_sql(sql) if opts.validate_sql else None
+        missing = _NO_SUCH_COLUMN_RE.search(error or "")
+        if error and missing and missing.group(1).lower() in {
+                name.lower() for name in opts.other_custom_fields}:
+            c.note(f"where: the custom field {missing.group(1)} is not defined in the active "
+                   f"database; the filter matches nothing there")
+            error = None
+        if not error:
+            c.sql("GSAK where clause", sql)
+            return
+        warnings = [f"OpenSAK can't run it: {error}"]
     body = ["Why:"]
     body += [f"- {w[len('where: '):] if w.startswith('where: ') else w}" for w in warnings]
     body.append("Translated as far as it goes — fix it up and uncomment it:")
@@ -2673,7 +2712,38 @@ def default_options(db_path: Optional[Path] = None) -> Options:
     miles = False
     if db_path is not None:
         _, miles = read_gsak_center(Path(db_path).with_name("gsak.ini"))
-    return Options(center=center, miles=miles, me=me, custom_fields=active_custom_fields())
+    other = read_gsak_custom_fields(Path(db_path)) if db_path is not None else {}
+    return Options(center=center, miles=miles, me=me, custom_fields=active_custom_fields(),
+                   other_custom_fields=other, validate_sql=_validate_on_active_database)
+
+
+def read_gsak_custom_fields(db_path: Path) -> dict[str, str]:
+    """{name: type} of the custom fields of all GSAK's databases, which
+    gsak.db3 lists together (read-only; empty when it has no such table)."""
+    from opensak.db.custom_fields import normalize_type
+    uri = f"file:{Path(db_path).as_posix()}?mode=ro"
+    found: dict[str, str] = {}
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            for name, gsak_type in conn.execute("SELECT fname, ftype FROM CustomDefs"):
+                type_ = normalize_type(str(gsak_type or ""))
+                if name and type_:
+                    found.setdefault(str(name), type_)
+    except sqlite3.Error:
+        return {}
+    return found
+
+
+def _validate_on_active_database(sql: str) -> Optional[str]:
+    """Why *sql* can't run on the active database, or None — also when no
+    database is open, as there is nothing to tell then."""
+    from opensak.db.database import get_session
+    from opensak.filters.engine import validate_where_sql
+    try:
+        with get_session() as session:
+            return validate_where_sql(session, sql)
+    except Exception:
+        return None
 
 
 def active_custom_fields() -> Optional[dict[str, str]]:

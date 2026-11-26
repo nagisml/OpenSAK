@@ -23,6 +23,7 @@ from opensak.db.database import get_session, db_health_check
 from opensak.db.models import Cache
 from opensak.filters.engine import (
     FilterSet, SortSpec, apply_filters_auto, get_nearby_caches, effective_coords,
+    where_clause_error,
     AvailableFilter, NotFoundFilter, IsOwnerFilter, CacheTypeFilter,
     DifficultyFilter, TerrainFilter
 )
@@ -266,6 +267,7 @@ class MainWindow(QMainWindow):
         # Start time per refresh generation, for the timing log lines in
         # _on_refresh_result(). Popped when the result (or error) comes back.
         self._refresh_started_at: dict[int, float] = {}
+        self._refresh_filterset: Optional[FilterSet] = None
         # GC codes whose data a running Lua macro changed; refreshed in one
         # go by end_macro() instead of once per call.
         self._macro_changed_codes: set[GcCode] = set()
@@ -1780,6 +1782,7 @@ class MainWindow(QMainWindow):
         # running the slot on a dead window. A lambda has no receiver, so
         # it was still called — "CacheTableView already deleted".
         self._refresh_started_at[generation] = _t0
+        self._refresh_filterset = fs
         worker.result.connect(self._on_refresh_result)
         worker.error.connect(self._on_refresh_error)
         worker.finished.connect(lambda w=worker: self._cleanup_refresh_worker(w))
@@ -1838,6 +1841,9 @@ class MainWindow(QMainWindow):
         else:
             self._count_lbl.setText(tr("count_caches", count=count))
         self._update_info_bar()
+        where_error = where_clause_error(self._refresh_filterset)
+        if where_error:
+            self._statusbar.showMessage(tr("status_where_failed", error=where_error), 15000)
         logger.info(
             "mainwindow: _refresh_cache_list done (+%.2fs total)",
             time.monotonic() - _t0,

@@ -134,7 +134,8 @@ class TestNativeConversions:
         assert c.filters[0].op == "regex"
         assert c.coverage == 1.0
 
-    def test_cache_types_partially_unmappable(self):
+    def test_cache_types_partially_unmappable(self, monkeypatch):
+        monkeypatch.setitem(gfi.GSAK_TYPE_LABEL_TO_OSAK, "Waymark", None)
         types = {label: "False" for label in gfi.GSAK_TYPE_LABEL_TO_OSAK}
         types["Traditional"] = "True"
         types["Waymark"] = "True"      # no OpenSAK equivalent

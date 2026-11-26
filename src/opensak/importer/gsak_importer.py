@@ -164,9 +164,8 @@ logger = logging.getLogger(__name__)
 # machine-readable type string for these is literally "Lost and Found
 # Event Caches" — i.e. GSAK's code F. F now maps to "Community
 # Celebration Event". D ("Groundspeak Lost and Found Celebration") is a
-# separate, distinct legacy Groundspeak program and stays unmapped
-# (falls back to "Unknown Cache") pending confirming evidence — as does
-# Y (Waymark), which still has no OpenSAK equivalent at all.
+# separate, distinct legacy Groundspeak program, mapped below together
+# with Y (Waymark), which is its own OpenSAK type.
 GSAK_CACHE_TYPE_MAP: dict[str, str] = {
     "T": "Traditional Cache",
     "M": "Multi-cache",
@@ -189,6 +188,10 @@ GSAK_CACHE_TYPE_MAP: dict[str, str] = {
     "X": "GPS Adventures Maze",
     "Z": "Mega-Event Cache",
     "F": "Community Celebration Event",
+    # GSAK's "Groundspeak Lost and Found Celebration" is the former name of
+    # geocaching.com's Geocaching HQ Celebration.
+    "D": "Geocaching HQ Celebration",
+    "Y": "Waymark",
 }
 
 # GSAK's Container field already matches OpenSAK's CONTAINER_SIZES strings

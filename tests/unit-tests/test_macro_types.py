@@ -40,7 +40,8 @@ def test_cache_types_list_every_type_with_its_gsak_letter():
     ("EARTHCACHE", "Earthcache\tR"),
     ("Benchmark", "Benchmark\tG"),
     ("Hotel/POI", "Hotel/POI\tnil"),
-    ("Y", "nil\tnil"),
+    ("Y", "Waymark\tY"),
+    ("D", "Geocaching HQ Celebration\tD"),
     ("Nope", "nil\tnil"),
 ])
 def test_cache_type_converts_letters_and_names(value, expected):

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Waymark">
+  <rect x="32" y="32" width="448" height="448" rx="72" fill="#37474F"/>
+  <path d="M256 104 C186 104 136 156 136 222 C136 306 256 408 256 408 C256 408 376 306 376 222 C376 156 326 104 256 104 Z" fill="#FFFFFF"/>
+  <path d="M196 180 L226 276 L256 204 L286 276 L316 180" fill="none" stroke="#37474F" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

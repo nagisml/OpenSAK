@@ -467,6 +467,7 @@ STRINGS: dict[str, str] = {
     "status_flagged_count":         "{flagged} van {total} caches gemarkeerd",
     "status_db_name":               "Database: {db_name}",
     "status_refresh_failed":        "Vernieuwen van cachelijst mislukt",
+    "status_where_failed":          "De Where-voorwaarde is mislukt, dus niets komt overeen: {error}",
 
     # ── Waypoint dialog ───────────────────────────────────────────────────────
     "wp_dialog_title_add":          "Cache toevoegen",

@@ -487,6 +487,8 @@ The clause is combined with AND alongside any other active filters.
 
 With custom fields (beta, `companion-db` feature flag), the clause runs on the caches *and* their custom fields, so a field is used by name, as in GSAK: `Angel = 1 AND GCFinds > 100`. A cache nobody set a field for has the field's default. The **ⓘ** button lists the fields of the active database.
 
+If a Where clause can't run, the filter matches nothing and the status bar shows the error.
+
 ### Regular expressions and log dates
 
 These functions work in the Where clause (and in macro SQL):
@@ -583,7 +585,7 @@ The third case is why the Where tab of an imported filter often opens with a blo
 ```sql
 -- NOT MIGRATED from the GSAK filter "Ideas_CH" (1 condition(s)).
 -- Rebuild these by hand, then delete the comment.
---   Cache types "Waymark": GSAK has these cache types but OpenSAK does not …
+--   GSAK where clause: the SQL could not be translated completely, so it was left inactive …
 -- Watch list
 (coalesce(watch, 0) = 1)
 ```
@@ -592,7 +594,7 @@ The comments always come first and the executable SQL last, so the clause stays 
 
 With custom fields on, GSAK's *Custom* tab becomes OpenSAK's, and where clauses keep using custom fields by name; GSAK's `Custom` table and `CachesAll` view become OpenSAK's `caches_all`, so `code in (select cCode from custom where Angel = 1)` runs as `gc_code in (select gc_code from caches_all where Angel = 1)`. The operators of GSAK's Custom tab are saved in GSAK's language; English and German are understood, anything else ends up as a comment. A field the active database doesn't have is still converted, with a note.
 
-The things that cannot be migrated are, in practice: GSAK's custom fields while custom fields are off, the Waymark and L&F Celebration cache types (the cache import files them under *Unknown Cache*, where nothing tells them apart), GSAK macro variables inside a saved `WHERE` clause, and columns OpenSAK does not store at all (FavPerc, LabId — unless they are custom fields of the active database). GSAK's *IsOwner*, *MacroFlag*, *MacroSort*, *Symbol* and *LastUserDate* migrate to OpenSAK's own columns of the same meaning.
+The things that cannot be migrated are, in practice: GSAK's custom fields while custom fields are off, GSAK macro functions OpenSAK doesn't have, and columns it doesn't store (FavPerc, LabId — unless they are custom fields). A clause may use a custom field of another GSAK database, such as `LabID`: it runs on the databases that have the field and matches nothing on the others. A clause OpenSAK can't run for any other reason goes into a comment, with the error. In a clause, GSAK's `Latitude`/`Longitude` become the corrected position (the posted one when there is none), as in GSAK. Caches of the Waymark and L&F Celebration types need importing again if they were imported as *Unknown Cache* before those types were supported. GSAK's *IsOwner*, *MacroFlag*, *MacroSort*, *Symbol* and *LastUserDate* migrate to OpenSAK's own columns of the same meaning.
 
 Two conditions come across with a small difference, which the import reports list:
 

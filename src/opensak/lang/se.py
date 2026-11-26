@@ -464,6 +464,7 @@ STRINGS: dict[str, str] = {
     "status_flagged_count":         "{flagged} av {total} cachar markerade",
     "status_db_name":               "Databas: {db_name}",
     "status_refresh_failed":        "Det gick inte att uppdatera cachelistan",
+    "status_where_failed":          "Where-villkoret misslyckades, så inget matchar: {error}",
 
     # ── Waypoint dialog ───────────────────────────────────────────────────────
     "wp_dialog_title_add":          "Lägg till cache",

@@ -34,6 +34,7 @@ CACHE_TYPES: list[str] = [
     "Project A.P.E. Cache",
     # Legacy / rare types
     "Locationless (Reverse) Cache",
+    "Waymark",
     # Custom waypoint types (issue #141) — created manually by the user
     "Waypoint",
     "Hotel/POI",

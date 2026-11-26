@@ -466,6 +466,7 @@ STRINGS: dict[str, str] = {
     "status_flagged_count":         "Oznaczono {flagged} z {total} skrytek",
     "status_db_name":               "Baza danych: {db_name}",
     "status_refresh_failed":        "Nie udało się odświeżyć listy skrytek",
+    "status_where_failed":          "Warunek Where nie powiódł się, więc nic nie pasuje: {error}",
 
     # ── Waypoint dialog ───────────────────────────────────────────────────────
     "wp_dialog_title_add":          "Dodaj skrytkę",

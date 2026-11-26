@@ -464,6 +464,7 @@ STRINGS: dict[str, str] = {
     "status_flagged_count":         "{flagged} z {total} kešů označeno",
     "status_db_name":               "Databáze: {db_name}",
     "status_refresh_failed":        "Nepodařilo se obnovit seznam kešek",
+    "status_where_failed":          "Podmínka Where selhala, proto nic nevyhovuje: {error}",
 
     # ── Waypoint dialog ───────────────────────────────────────────────────────
     "wp_dialog_title_add":          "Přidat keš",

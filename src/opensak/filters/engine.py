@@ -19,6 +19,8 @@ Usage
 
 from __future__ import annotations
 
+import logging
+
 import json
 import math
 import re
@@ -37,6 +39,8 @@ from opensak.geodesy import DIRECTIONS, bearing_direction
 from opensak.utils.constants import (
     DNF_LOG_TYPES, FOUND_LOG_TYPES, LOG_TYPES, PHYSICAL_WAYPOINT_TYPES,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1248,6 +1252,7 @@ class WhereClauseFilter(BaseFilter):
     def __init__(self, sql: str):
         self.sql = sql.strip()
         self._matching_ids: Optional[set] = None  # populated by apply_filters
+        self.sql_error: Optional[str] = None      # why the last run failed
 
     def matches(self, cache: Cache) -> bool:
         if self._matching_ids is None:
@@ -4044,8 +4049,11 @@ def _prepare_where_clause_filters(
                 _sa_text(f"SELECT id FROM {_source} WHERE ({_sql})")
             )
             _f._matching_ids = {row[0] for row in _result}
-        except Exception:
+            _f.sql_error = None
+        except Exception as exc:
             _f._matching_ids = set()  # invalid SQL → no matches
+            _f.sql_error = str(getattr(exc, "orig", exc))
+            logger.warning("Where clause failed, so it matches nothing: %s", _f.sql_error)
 
 
 def _register_distance_udf(
@@ -4075,6 +4083,16 @@ def _register_distance_udf(
     _dbapi = session.connection().connection.dbapi_connection
     assert _dbapi is not None
     _dbapi.create_function("_opensak_dist", 2, _dist_udf)
+
+
+def where_clause_error(filterset: Optional["FilterSet"]) -> Optional[str]:
+    """Why a Where clause of *filterset* failed in its last run, or None."""
+    if not filterset:
+        return None
+    for _f in _iter_filters(filterset):
+        if isinstance(_f, WhereClauseFilter) and _f.sql_error:
+            return _f.sql_error
+    return None
 
 
 def validate_where_sql(session: Session, sql: str) -> Optional[str]:
