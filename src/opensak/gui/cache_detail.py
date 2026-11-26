@@ -12,7 +12,7 @@ import webbrowser
 from datetime import datetime
 from opensak.utils.constants import LOG_COLOURS
 from opensak.utils.log_dates import is_own_log, log_calendar_date
-from PySide6.QtCore import Qt, QUrl, Signal, QEvent, QSize
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, QUrl, Signal, QEvent, QSize
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTextBrowser, QTabWidget, QFrame, QSizePolicy,
@@ -22,6 +22,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import (
     QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor,
+    QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler,
 )
 
 import logging
@@ -111,10 +112,28 @@ def has_remote_content(body: str) -> bool:
     return _REMOTE_CONTENT_RE.search(body) is not None
 
 
+def _has_missing_remote_content(body: str) -> bool:
+    """True if *body* loads something from the web that isn't stored for
+    offline use (#1361): an image without a stored copy, or remote content
+    that isn't an image we know how to find (a style sheet, say)."""
+    if not has_remote_content(body):
+        return False
+    from opensak import desc_images
+    urls = desc_images.image_urls(body)
+    return not urls or any(desc_images.local_path(u) is None for u in urls)
+
+
+# #1361: stored description images (desc_images.py) are served to the
+# description pane as opensak://img/<key>.
+DESC_IMAGE_HOST = "img"
+
+
 class _DescInterceptor(QWebEngineUrlRequestInterceptor):
-    """#1361: the description's own request interceptor. While Offline mode is
-    on it blocks every http(s) request — the images on the cache owner's
-    image hosts — unless the user clicked Load images for this cache
+    """#1361: the description's own request interceptor. An image stored for
+    offline use (desc_images.py) is shown from disk: the request goes to
+    opensak://img/<key> instead, online or not. While Offline mode is on,
+    every other http(s) request — the images on the cache owner's image
+    hosts — is blocked, unless the user clicked Load images for this cache
     (*allow_remote*)."""
 
     def __init__(self, parent=None) -> None:
@@ -122,10 +141,34 @@ class _DescInterceptor(QWebEngineUrlRequestInterceptor):
         self.allow_remote = False
 
     def interceptRequest(self, info) -> None:
-        from opensak import net
-        if (info.requestUrl().scheme() in ("http", "https")
-                and not self.allow_remote and net.offline_mode()):
+        from opensak import desc_images, net
+        url = info.requestUrl()
+        if url.scheme() not in ("http", "https"):
+            return
+        text = url.toString()
+        if desc_images.local_path(text) is not None:
+            info.redirect(QUrl(f"opensak://{DESC_IMAGE_HOST}/{desc_images.url_key(text)}"))
+        elif not self.allow_remote and net.offline_mode():
             info.block(True)
+
+
+class _DescImageHandler(QWebEngineUrlSchemeHandler):
+    """#1361: answers opensak://img/<key> with the stored image."""
+
+    def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
+        from opensak import desc_images
+        url = job.requestUrl()
+        found = None
+        if url.host() == DESC_IMAGE_HOST and job.requestMethod().data() == b"GET":
+            found = desc_images.read_image(url.path().strip("/"))
+        if found is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        data, mime = found
+        buf = QBuffer(job)   # the job owns the buffer
+        buf.setData(QByteArray(data))
+        buf.open(QIODevice.OpenModeFlag.ReadOnly)
+        job.reply(mime.encode(), buf)
 
 
 class _DescWebPage(QWebEnginePage):
@@ -383,6 +426,9 @@ class CacheDetailPanel(QWidget):
             self._desc_profile = QWebEngineProfile()
             self._desc_interceptor = _DescInterceptor(self._desc_profile)
             self._desc_profile.setUrlRequestInterceptor(self._desc_interceptor)
+            # opensak:// is registered at startup (web_assets.register_scheme).
+            self._desc_image_handler = _DescImageHandler(self._desc_profile)
+            self._desc_profile.installUrlSchemeHandler(b"opensak", self._desc_image_handler)
             self._desc_page = _DescWebPage(self._desc_profile)
             self._desc_view.setPage(self._desc_page)
 
@@ -1070,7 +1116,8 @@ class CacheDetailPanel(QWidget):
     def _set_description(self, body: str) -> None:
         """Show *body* in the Description tab. #1361: in Offline mode its
         remote content stays blocked, and the Load images bar is shown,
-        unless the user already loaded the images of this cache."""
+        unless the user already loaded the images of this cache, or all of
+        them are stored for offline use."""
         from opensak import net
         if self._images_allowed_for != self._current_gc_code:
             self._images_allowed_for = None
@@ -1079,7 +1126,7 @@ class CacheDetailPanel(QWidget):
             self._desc_interceptor.allow_remote = allowed
         self._desc_body = body
         self._images_bar.setVisible(
-            net.offline_mode() and not allowed and has_remote_content(body))
+            net.offline_mode() and not allowed and _has_missing_remote_content(body))
         self._desc_view.setHtml(_wrap_html(body))
 
     def _load_images(self) -> None:

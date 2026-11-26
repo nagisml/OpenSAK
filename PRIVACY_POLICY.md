@@ -162,6 +162,8 @@ Under **Settings → General → Offline mode** you can tell OpenSAK not to go o
 
 Cache descriptions are written by the cache owners and often contain images that are hosted elsewhere: on Geocaching.com's image servers or on any other web site the owner chose. When you view a description, OpenSAK loads these images directly from those servers, as a web browser would. Such a request includes what any web request does, such as your IP address, and lets the image host see that the description was viewed. OpenSAK sends no login data of its own, and keeps no cookies from those hosts after it closes. The image host's own privacy policy applies. With Offline mode on (see 5.7), the images are not loaded unless you click **Load images** for that cache.
 
+With **Waypoint → Download description images…** you can download the images of the caches you choose once and keep them on your computer, in the OpenSAK data folder, shared by all databases. A description then shows the stored copy instead of asking the image host again, also without internet. The download goes to the same image hosts and includes what any web request does, such as your IP address; no cache data is sent. OpenSAK asks each image host for one image at a time, with a pause in between, and waits longer when a host asks it to. Nothing is downloaded while Offline mode is on. **Settings → General** shows how much space the stored images use and can delete them.
+
 ---
 
 ## 6. Your Rights and Data Control

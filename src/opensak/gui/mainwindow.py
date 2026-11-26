@@ -333,6 +333,7 @@ class MainWindow(QMainWindow):
         self._cache_table.flags_changed.connect(self._on_flags_changed)
         self._cache_table.sort_changed.connect(self._on_sort_changed)
         self._cache_table.location_updated.connect(self._refresh_cache_list)
+        self._cache_table.desc_images_downloaded.connect(self._reshow_detail)
         self._cache_table.edit_requested.connect(self._edit_waypoint_from_cache)
         self._cache_table.delete_requested.connect(self._delete_cache)
         self._cache_table.center_point_requested.connect(self._set_cache_as_center)
@@ -533,6 +534,13 @@ class MainWindow(QMainWindow):
         act_copy_caches = QAction(tr("action_copy_caches"), self)
         act_copy_caches.triggered.connect(self._open_copy_caches_dialog)
         wp_menu.addAction(act_copy_caches)
+
+        wp_menu.addSeparator()
+
+        # #1361: description images for offline use
+        act_desc_images = QAction(tr("action_desc_images"), self)
+        act_desc_images.triggered.connect(self._open_description_images)
+        wp_menu.addAction(act_desc_images)
 
         from opensak.utils import flags
         if flags.reverse_geocoding:
@@ -4491,6 +4499,26 @@ class MainWindow(QMainWindow):
         dlg = UpdateLocationDialog(self)
         dlg.location_updated.connect(self._refresh_cache_list)
         dlg.exec()
+
+    def _open_description_images(self) -> None:
+        """#1361: Waypoint → Download description images… for the current list."""
+        from opensak.gui.dialogs.description_images_dialog import DescriptionImagesDialog
+        codes = [
+            c.gc_code for c in (
+                self._cache_table._model.cache_at(i)
+                for i in range(self._cache_table.row_count())
+            ) if c is not None
+        ]
+        dlg = DescriptionImagesDialog(self, list_codes=codes)
+        dlg.images_downloaded.connect(self._reshow_detail)
+        dlg.exec()
+
+    def _reshow_detail(self) -> None:
+        """Show the selected cache again, e.g. with its newly stored images."""
+        cache = self._cache_table.selected_cache()
+        full = self._load_full_cache(cache.gc_code) if cache else None
+        if full:
+            self._detail_panel.show_cache(full)
 
     def _open_download_boundaries(self) -> None:
         from opensak.gui.dialogs.boundary_packs_dialog import BoundaryDownloadDialog

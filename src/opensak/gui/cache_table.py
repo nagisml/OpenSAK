@@ -1626,6 +1626,7 @@ class CacheTableView(QTableView):
     flags_changed = Signal()          # videresendes fra model
     sort_changed = Signal(str, bool)  # (col_id, ascending) videresendes fra model
     location_updated = Signal()       # emitted after right-click location update
+    desc_images_downloaded = Signal() # #1361: right-click image download stored some
     edit_requested = Signal(object)   # emitted when user requests edit of a cache
     delete_requested = Signal(object)  # Cache — "Delete cache…" in the context menu (#693)
     center_point_requested = Signal(object)  # emitted with a Cache — "Sæt som centerpunkt" (#511)
@@ -2114,6 +2115,13 @@ class CacheTableView(QTableView):
             act_found = menu.addAction(tr("ctx_mark_found"))
             act_found.triggered.connect(lambda: self._toggle_found(cache, True))
 
+        # #1361: this cache's description images for offline use
+        menu.addSeparator()
+        act_desc_images = menu.addAction(tr("ctx_desc_images"))
+        act_desc_images.triggered.connect(
+            lambda checked=False, code=cache.gc_code: self._download_desc_images(code)
+        )
+
         from opensak.utils import flags
         if flags.reverse_geocoding:
             menu.addSeparator()
@@ -2295,6 +2303,13 @@ class CacheTableView(QTableView):
                 c.found_date = None
         self.refresh_cache_row(cache.gc_code)
         self.found_status_changed.emit(cache.gc_code)
+
+    def _download_desc_images(self, gc_code: str) -> None:
+        """#1361: DescriptionImagesDialog targeted at a single cache."""
+        from opensak.gui.dialogs.description_images_dialog import DescriptionImagesDialog
+        dlg = DescriptionImagesDialog(self, gc_codes=[gc_code])
+        dlg.images_downloaded.connect(self.desc_images_downloaded)
+        dlg.exec()
 
     def _update_location(self, gc_code: str) -> None:
         """Open UpdateLocationDialog targeted at a single cache."""

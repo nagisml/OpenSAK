@@ -414,6 +414,16 @@ class SettingsDialog(QDialog):
         self._offline_mode_hint.setStyleSheet(hint_style())
         self._offline_mode_hint.setWordWrap(True)
         offline_layout.addWidget(self._offline_mode_hint)
+        # #1361: description images stored for offline use
+        images_row = QHBoxLayout()
+        self._desc_images_lbl = QLabel("")
+        self._desc_images_lbl.setWordWrap(True)
+        images_row.addWidget(self._desc_images_lbl, 1)
+        self._desc_images_clear_btn = QPushButton(tr("settings_desc_images_clear"))
+        self._desc_images_clear_btn.clicked.connect(self._clear_desc_images)
+        images_row.addWidget(self._desc_images_clear_btn)
+        offline_layout.addLayout(images_row)
+        self._show_desc_images_size()
         layout.addWidget(offline_group)
 
         layout.addStretch()
@@ -2054,6 +2064,24 @@ class SettingsDialog(QDialog):
         for worker in (self._pq_email_worker, self._oauth_worker, self._profile_worker):
             keep_worker_alive(worker, self.parent())
         super().done(result)
+
+    def _show_desc_images_size(self) -> None:
+        from opensak import desc_images
+        size = desc_images.size_bytes()
+        self._desc_images_lbl.setText(
+            tr("settings_desc_images_size", size=f"{size / (1024 * 1024):.1f}"))
+        self._desc_images_clear_btn.setEnabled(size > 0)
+
+    def _clear_desc_images(self) -> None:
+        # #1361: takes effect at once, like the map tile cache button.
+        from opensak import desc_images
+        freed = desc_images.clear()
+        self._show_desc_images_size()
+        QMessageBox.information(
+            self,
+            tr("settings_desc_images_clear"),
+            tr("settings_desc_images_cleared", size=f"{freed / (1024 * 1024):.1f}"),
+        )
 
     def _clear_map_tile_cache(self) -> None:
         # #1111: takes effect at once, not on OK — like the other buttons.
